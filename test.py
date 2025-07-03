@@ -12,13 +12,14 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def main(config_path, dataset_epoch=None, dataset_name=None):
+def main(config_path, epoch=None, dataset=None):
     config = load_config(config_path)
-    DATASET_NAME = dataset_name if dataset_name is not None else config.get('DATASET_NAME', 'CSAW')
+    DATASET_NAME = dataset if dataset is not None else config.get('DATASET_NAME', 'CSAW')
     SPLITS_DIR = config.get('SPLITS_DIR', '/content/dataset')
     MODEL_NAME = config.get('MODEL_NAME', 'hustvl/yolos-base')
     MAX_SIZE = config.get('MAX_SIZE', 640)
 
+    # Prioritize CLI arguments for training config as well
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
     num_train_epochs = training_cfg.get('epochs', 20)
@@ -68,14 +69,13 @@ def main(config_path, dataset_epoch=None, dataset_name=None):
     image_processor = get_image_processor(MODEL_NAME, MAX_SIZE)
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
 
-    # Dummy datasets for Trainer (required, but not used for test)
     train_dataset = BreastCancerDataset(
         split='train',
         splits_dir=SPLITS_DIR,
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
         model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=dataset_epoch
+        dataset_epoch=epoch
     )
     val_dataset = BreastCancerDataset(
         split='val',
@@ -83,7 +83,7 @@ def main(config_path, dataset_epoch=None, dataset_name=None):
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
         model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=dataset_epoch
+        dataset_epoch=epoch
     )
 
     model = AutoModelForObjectDetection.from_pretrained(
@@ -112,7 +112,7 @@ def main(config_path, dataset_epoch=None, dataset_name=None):
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
         model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=dataset_epoch
+        dataset_epoch=epoch
     )
     print(f'Test loader: {len(test_dataset)} samples')
     trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
@@ -123,4 +123,4 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     args = parser.parse_args()
-    main(args.config, args.dataset_epoch, args.dataset_name)
+    main(args.config, args.epoch, args.dataset)
