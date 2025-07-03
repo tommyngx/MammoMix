@@ -103,7 +103,7 @@ def main(config_path):
         lr_scheduler_type=lr_scheduler_type,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
         eval_do_concat_batches=eval_do_concat_batches,
-        evaluation_strategy=evaluation_strategy,
+        #evaluation_strategy=evaluation_strategy,
         save_strategy=save_strategy,
         save_total_limit=save_total_limit,
         logging_strategy=logging_strategy,
