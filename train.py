@@ -1,5 +1,10 @@
 import argparse
 import os
+
+# Force tqdm to work properly in all environments
+os.environ['TQDM_NOTEBOOK'] = '0'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 import pickle
 import numpy as np
 import albumentations as A
