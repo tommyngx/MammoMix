@@ -107,7 +107,7 @@ def main(config_path):
         #save_strategy=save_strategy,
         save_total_limit=save_total_limit,
         #logging_strategy=logging_strategy,
-        load_best_model_at_end=load_best_model_at_end,
+        #load_best_model_at_end=load_best_model_at_end,
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
         fp16=torch.cuda.is_available(),
