@@ -1,5 +1,11 @@
 import argparse
-from transformers import AutoModelForObjectDetection, TrainingArguments, Trainer
+from transformers import (
+    AutoImageProcessor,
+    AutoModelForObjectDetection,
+    TrainingArguments,
+    Trainer,
+    EarlyStoppingCallback,
+)
 from dataset import BreastCancerDataset, collate_fn
 from torch.utils.data import DataLoader
 from utils import load_config, get_image_processor, get_model_type
@@ -74,7 +80,8 @@ def main(config_path, epoch=None, dataset=None):
     # Load training arguments from config
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
-    num_train_epochs = training_cfg.get('epochs', 20)
+    # Use CLI epoch if provided, else from config
+    num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
     per_device_train_batch_size = training_cfg.get('batch_size', 8)
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
     learning_rate = training_cfg.get('learning_rate', 5e-5)
@@ -93,6 +100,8 @@ def main(config_path, epoch=None, dataset=None):
     dataloader_num_workers = training_cfg.get('num_workers', 2)
     gradient_accumulation_steps = training_cfg.get('gradient_accumulation_steps', 2)
     remove_unused_columns = training_cfg.get('remove_unused_columns', False)
+
+    print(f"Using epoch (num_train_epochs): {num_train_epochs}")
 
     training_args = TrainingArguments(
         output_dir=output_dir,

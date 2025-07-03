@@ -1,5 +1,11 @@
 import argparse
-from transformers import AutoModelForObjectDetection, Trainer, TrainingArguments
+from transformers import (
+    AutoImageProcessor,
+    AutoModelForObjectDetection,
+    TrainingArguments,
+    Trainer,
+    EarlyStoppingCallback,
+)
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn

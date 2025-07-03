@@ -2,6 +2,14 @@ import torch
 import numpy as np
 from dataclasses import dataclass
 from functools import partial
+from transformers.image_transforms import center_to_corners_format
+from transformers import (
+    AutoImageProcessor,
+    AutoModelForObjectDetection,
+    TrainingArguments,
+    Trainer,
+    EarlyStoppingCallback,
+)
 
 # You need to provide or import these utility functions:
 # from your_metrics_lib import mean_average_precision, center_to_corners_format
