@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from sklearn.linear_model import LinearRegression
 from pathlib import Path
 import datetime
+from tqdm.auto import tqdm  # Add this import
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -138,10 +139,10 @@ def main(config_path, epoch=None, dataset=None):
         lr_scheduler_type=lr_scheduler_type,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
         eval_do_concat_batches=eval_do_concat_batches,
-        eval_strategy='epoch', 
+        disable_tqdm=False,  # Add this line
+        logging_dir=wandb_dir if wandb_dir else "./logs",  # Add this line
+        eval_strategy='epoch',
         save_strategy='epoch',
-        #evaluation_strategy=evaluation_strategy,
-        #save_strategy=save_strategy,
         save_total_limit=save_total_limit,
         #logging_strategy=logging_strategy,
         #load_best_model_at_end=load_best_model_at_end,
