@@ -33,13 +33,6 @@ def convert_bbox_yolo_to_pascal(boxes, image_size):
     to Pascal VOC format (x_min, y_min, x_max, y_max) in absolute coordinates.
     '''
     boxes = center_to_corners_format(boxes)
-    # --- Fix: Ensure image_size is a tuple/list of two ints ---
-    if isinstance(image_size, (list, tuple)) and len(image_size) == 1:
-        image_size = image_size[0]
-    if isinstance(image_size, torch.Tensor) and image_size.numel() == 1:
-        image_size = image_size.item()
-    if not (isinstance(image_size, (list, tuple)) and len(image_size) == 2):
-        raise ValueError(f"image_size should be (height, width), got {image_size}")
     height, width = image_size
     boxes = boxes * torch.tensor([[width, height, width, height]])
     return boxes
