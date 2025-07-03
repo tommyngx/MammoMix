@@ -44,10 +44,12 @@ def load_config(config_path):
 
 def main(config_path, epoch=None, dataset=None):
     config = load_config(config_path)
-    DATASET_NAME = dataset if dataset is not None else config.get('DATASET_NAME', 'CSAW')
-    SPLITS_DIR = config.get('splits_dir', '/content/dataset')
-    MODEL_NAME = config.get('model_name', 'hustvl/yolos-base')
-    MAX_SIZE = config.get('MAX_SIZE', 640)
+    DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
+    
+    # Consistently get splits_dir from dataset section
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
 
     # Add wandb folder support
     wandb_dir = None
@@ -57,11 +59,10 @@ def main(config_path, epoch=None, dataset=None):
 
     image_processor = get_image_processor(MODEL_NAME, MAX_SIZE)
 
-    # Get data directories from config
+    # Get data directories from config - use the same SPLITS_DIR for consistency
     data_config = config['data']
-    splits_dir = Path(config['dataset']['splits_dir'])
-    train_dir = splits_dir / data_config['train_dir']
-    val_dir = splits_dir / data_config['val_dir']
+    train_dir = SPLITS_DIR / data_config['train_dir']
+    val_dir = SPLITS_DIR / data_config['val_dir']
 
     train_dataset = BreastCancerDataset(
         split='train',
