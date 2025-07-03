@@ -179,10 +179,30 @@ def main(config_path, epoch=None, dataset=None):
         compute_metrics=eval_compute_metrics_fn,
         # callbacks=[EarlyStoppingCallback(early_stopping_patience=10)]
     )
+    print("\n=== Training now ===")
+    
     trainer.train()
     # Add DDMMYY to the save path
     date_str = datetime.datetime.now().strftime("%d%m%y")
     trainer.save_model(f'../yolos_{DATASET_NAME}_{date_str}')
+
+    # Evaluate on test dataset
+    print("\n=== Evaluating on test dataset ===")
+    test_dataset = BreastCancerDataset(
+        split='test',
+        splits_dir=SPLITS_DIR,
+        dataset_name=DATASET_NAME,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
+    print(f'Test dataset: {len(test_dataset)} samples')
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    
+    # Print test results
+    print("\n=== Test Results ===")
+    for key, value in test_results.items():
+        print(f"{key}: {value}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
