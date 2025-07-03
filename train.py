@@ -154,7 +154,7 @@ def main(config_path, epoch=None, dataset=None):
         lr_scheduler_kwargs=lr_scheduler_kwargs,
         eval_do_concat_batches=eval_do_concat_batches,
         disable_tqdm=False,  # Ensure tqdm is enabled
-        tqdm_disable=False,  # Additional tqdm setting
+        #tqdm_disable=False,  # Additional tqdm setting
         logging_dir=wandb_dir if wandb_dir else "./logs",
         eval_strategy="epoch",
         save_strategy="epoch",
