@@ -10,6 +10,7 @@ from functools import partial
 from dataclasses import dataclass
 from sklearn.linear_model import LinearRegression
 from pathlib import Path
+import datetime
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -155,7 +156,9 @@ def main(config_path, epoch=None, dataset=None):
         # callbacks=[EarlyStoppingCallback(early_stopping_patience=10)]
     )
     trainer.train()
-    trainer.save_model(f'./yolos_{DATASET_NAME}')
+    # Add DDMMYY to the save path
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    trainer.save_model(f'../yolos_{DATASET_NAME}_{date_str}')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
