@@ -37,7 +37,7 @@ training:
   greater_is_better: true
   dataloader_num_workers: 4
   gradient_accumulation_steps: 2
-  remove_unused_columns: false
+  remove_unused_columns: False
 
 logging:
   use_wandb: true
