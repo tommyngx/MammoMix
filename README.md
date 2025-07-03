@@ -1,4 +1,4 @@
-# Object Detection
+# MMX
 
 MammoMix is a deep learning-based object detection project for identifying breast cancer in medical images. It leverages state-of-the-art models and libraries for robust and reproducible results.
 
