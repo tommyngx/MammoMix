@@ -4,9 +4,17 @@ from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn
 import torch
+import yaml
+from pathlib import Path
+
+def load_config():
+    config_path = Path(__file__).parent / "configs" / "config.yaml"
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
 
 def main(config_path):
-    config = load_config(config_path)
+    config = load_config()
     DATASET_NAME = config.get('DATASET_NAME', 'CSAW')
     SPLITS_DIR = config.get('SPLITS_DIR', '/content/dataset')
     MODEL_NAME = config.get('MODEL_NAME', 'hustvl/yolos-base')

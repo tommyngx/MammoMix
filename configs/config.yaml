@@ -10,8 +10,9 @@ model:
   model_name: hustvl/yolos-base
 
 data:
-  train_dir: data/train
-  val_dir: data/val
+  train_dir: train
+  val_dir: val
+  test_dir: test
   batch_size: 8
   num_workers: 4
   image_size: 512

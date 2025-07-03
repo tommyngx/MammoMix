@@ -5,6 +5,14 @@ from torch.utils.data import DataLoader
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn
 import torch
+import yaml
+from pathlib import Path
+
+def load_config():
+    config_path = Path(__file__).parent / "configs" / "config.yaml"
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
 
 def main(config_path):
     config = load_config(config_path)
@@ -14,6 +22,12 @@ def main(config_path):
     MAX_SIZE = config.get('MAX_SIZE', 640)
 
     image_processor = get_image_processor(MODEL_NAME, MAX_SIZE)
+
+    # Get data directories from config
+    data_config = config['data']
+    splits_dir = Path(config['dataset']['splits_dir'])
+    train_dir = splits_dir / data_config['train_dir']
+    val_dir = splits_dir / data_config['val_dir']
 
     train_dataset = BreastCancerDataset(
         split='train',
