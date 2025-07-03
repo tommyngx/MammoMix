@@ -1,0 +1,6 @@
+datasets
+transformers[torch]
+timm
+wandb
+torchmetrics[detection]
+torch
