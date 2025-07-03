@@ -105,6 +105,8 @@ def main(config_path, epoch=None, dataset=None):
         lr_scheduler_type=lr_scheduler_type,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
         eval_do_concat_batches=eval_do_concat_batches,
+        eval_strategy='epoch', 
+        save_strategy='epoch',
         #evaluation_strategy=evaluation_strategy,
         #save_strategy=save_strategy,
         save_total_limit=save_total_limit,
