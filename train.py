@@ -13,9 +13,9 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def main(config_path):
+def main(config_path, dataset_epoch=None, dataset_name=None):
     config = load_config(config_path)
-    DATASET_NAME = config.get('DATASET_NAME', 'CSAW')
+    DATASET_NAME = dataset_name if dataset_name is not None else config.get('DATASET_NAME', 'CSAW')
     SPLITS_DIR = config.get('SPLITS_DIR', '/content/dataset')
     MODEL_NAME = config.get('MODEL_NAME', 'hustvl/yolos-base')
     MAX_SIZE = config.get('MAX_SIZE', 640)
@@ -33,14 +33,16 @@ def main(config_path):
         splits_dir=SPLITS_DIR,
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME)
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=dataset_epoch  # <-- pass dataset_epoch
     )
     val_dataset = BreastCancerDataset(
         split='val',
         splits_dir=SPLITS_DIR,
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME)
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=dataset_epoch  # <-- pass dataset_epoch
     )
 
     train_loader = DataLoader(
@@ -135,6 +137,7 @@ def main(config_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     args = parser.parse_args()
-    main(args.config)
-    main(args.config)
+    main(args.config, args.dataset_epoch, args.dataset_name)
