@@ -7,14 +7,13 @@ import torch
 import yaml
 from pathlib import Path
 
-def load_config():
-    config_path = Path(__file__).parent / "configs" / "config.yaml"
+def load_config(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
 
 def main(config_path):
-    config = load_config()
+    config = load_config(config_path)
     DATASET_NAME = config.get('DATASET_NAME', 'CSAW')
     SPLITS_DIR = config.get('SPLITS_DIR', '/content/dataset')
     MODEL_NAME = config.get('MODEL_NAME', 'hustvl/yolos-base')
@@ -119,4 +118,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
     args = parser.parse_args()
+    main(args.config)
     main(args.config)

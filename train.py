@@ -8,8 +8,7 @@ import torch
 import yaml
 from pathlib import Path
 
-def load_config():
-    config_path = Path(__file__).parent / "configs" / "config.yaml"
+def load_config(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
@@ -137,4 +136,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
     args = parser.parse_args()
+    main(args.config)
     main(args.config)
