@@ -122,8 +122,13 @@ def main(config_path, epoch=None, dataset=None):
 
     print(f"Using epoch (num_train_epochs): {num_train_epochs}")
 
+    # Set a unique run_name for wandb
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"{MODEL_NAME.replace('/', '_')}_{DATASET_NAME}_{date_str}"
+
     training_args = TrainingArguments(
         output_dir=output_dir,
+        run_name=run_name,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
