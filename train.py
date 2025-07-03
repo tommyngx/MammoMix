@@ -1,10 +1,5 @@
 import argparse
 import os
-
-# Force tqdm to work properly in all environments
-os.environ['TQDM_NOTEBOOK'] = '0'
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-
 import pickle
 import numpy as np
 import albumentations as A
@@ -29,6 +24,8 @@ from transformers import (
     EarlyStoppingCallback,
     IntervalStrategy,  # Add this to imports
 )
+from transformers.trainer_callback import TrainerCallback
+from transformers.utils import logging
 
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
@@ -164,6 +161,45 @@ def main(config_path, epoch=None, dataset=None):
 
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
 
+    # Custom progress bar callback
+    class CustomProgressCallback(TrainerCallback):
+        def __init__(self):
+            self.training_bar = None
+            self.prediction_bar = None
+            self.logger = logging.get_logger(__name__)
+            
+        def on_train_begin(self, args, state, control, **kwargs):
+            if state.max_steps > 0:
+                total = state.max_steps
+                print(f"\nTraining for {total} steps")
+                self.training_bar = tqdm(total=total, position=0, leave=True)
+        
+        def on_step_end(self, args, state, control, **kwargs):
+            if self.training_bar:
+                self.training_bar.update(1)
+                
+        def on_evaluate(self, args, state, control, **kwargs):
+            print("\nStarting evaluation...")
+        
+        def on_prediction_step(self, args, state, control, **kwargs):
+            if not self.prediction_bar and args.eval_dataset is not None:
+                if hasattr(args.eval_dataset, "__len__"):
+                    total = len(args.eval_dataset) // args.eval_batch_size
+                    self.prediction_bar = tqdm(total=total, position=0, leave=True, desc="Evaluating")
+            if self.prediction_bar:
+                self.prediction_bar.update(1)
+        
+        def on_evaluate_end(self, args, state, control, **kwargs):
+            if self.prediction_bar:
+                self.prediction_bar.close()
+                self.prediction_bar = None
+            print("\nEvaluation completed")
+        
+        def on_train_end(self, args, state, control, **kwargs):
+            if self.training_bar:
+                self.training_bar.close()
+                self.training_bar = None
+
     # Training
     trainer = Trainer(
         model=model,
@@ -173,7 +209,7 @@ def main(config_path, epoch=None, dataset=None):
         processing_class=image_processor,
         data_collator=collate_fn,
         compute_metrics=eval_compute_metrics_fn,
-        # callbacks=[EarlyStoppingCallback(early_stopping_patience=10)]
+        callbacks=[CustomProgressCallback()],  # Use our custom progress callback
     )
     trainer.train()
     # Add DDMMYY to the save path
