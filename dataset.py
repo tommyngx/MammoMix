@@ -85,6 +85,9 @@ class BreastCancerDataset(Dataset):
             raise ValueError(f"Unsupported image format: {ext}. Supported formats are .jpg, .jpeg, .png")
 
         image = np.array(Image.open(img_path).convert('RGB'))
+        # Store original image dimensions for evaluation
+        original_height, original_width = image.shape[:2]
+        
         label_path = base.replace('images', 'labels') + '.xml'
         bboxes, labels = [], []
 
@@ -121,7 +124,9 @@ class BreastCancerDataset(Dataset):
         encoding = self.image_processor(images=image, annotations=annotations, return_tensors='pt')
         result = {
             'pixel_values': encoding['pixel_values'].squeeze(0),
-            'labels': encoding['labels'][0]
+            'labels': encoding['labels'][0],
+            # Include size as a tuple of (height, width)
+            'size': (original_height, original_width)
         }
         if self.model_type == 'detr' and 'pixel_mask' in encoding:
             result['pixel_mask'] = encoding['pixel_mask'].squeeze(0)
@@ -138,6 +143,8 @@ def collate_fn(batch):
     data = {}
     data['pixel_values'] = torch.stack([x['pixel_values'] for x in batch])
     data['labels'] = [x['labels'] for x in batch]
+    # Include size information in collated batch
+    data['size'] = [x['size'] for x in batch]
     if 'pixel_mask' in batch[0]:
         data['pixel_mask'] = torch.stack([x['pixel_mask'] for x in batch])
     return data
