@@ -6,7 +6,7 @@ import albumentations as A
 from utils import parse_voc_xml, xml2dicts
 
 class BreastCancerDataset(Dataset):
-    def __init__(self, split, splits_dir, dataset_name, image_processor, model_type='detr'):
+    def __init__(self, split, splits_dir, dataset_name, image_processor, model_type='detr', dataset_epoch=None):
         """
         Args:
             split (str): Split type ('train', 'val', 'test').
@@ -14,11 +14,13 @@ class BreastCancerDataset(Dataset):
             dataset_name (str): Name of the dataset.
             image_processor: DETR image processor.
             model_type (str): 'detr' or 'yolos'. Controls pixel_mask output.
+            dataset_epoch (int, optional): Epoch value, if provided.
         """
         self.split = split
         self.splits_dir = splits_dir
         self.dataset_name = dataset_name
         self.model_type = model_type
+        self.dataset_epoch = dataset_epoch
         if split not in ['train', 'val', 'test']:
             raise ValueError(f"Invalid split '{split}'. Must be one of ['train', 'val', 'test'].")
 
