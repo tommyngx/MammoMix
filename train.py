@@ -142,10 +142,11 @@ def main(config_path, epoch=None, dataset=None):
         eval_do_concat_batches=eval_do_concat_batches,
         disable_tqdm=False,
         logging_dir=wandb_dir if wandb_dir else "./logs",
-        evaluation_strategy=evaluation_strategy,  # Fixed: use IntervalStrategy
-        save_strategy=save_strategy,       # Fixed: use IntervalStrategy
+        # Try with the original parameter names but with string values
+        eval_strategy="epoch",
+        save_strategy="epoch",
         save_total_limit=save_total_limit,
-        logging_strategy=logging_strategy,    # Fixed: use IntervalStrategy
+        logging_strategy="epoch",
         report_to="all",
         load_best_model_at_end=True,
         metric_for_best_model=metric_for_best_model,
