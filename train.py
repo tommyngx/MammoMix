@@ -45,8 +45,8 @@ def load_config(config_path):
 def main(config_path, epoch=None, dataset=None):
     config = load_config(config_path)
     DATASET_NAME = dataset if dataset is not None else config.get('DATASET_NAME', 'CSAW')
-    SPLITS_DIR = config.get('SPLITS_DIR', '/content/dataset')
-    MODEL_NAME = config.get('MODEL_NAME', 'hustvl/yolos-base')
+    SPLITS_DIR = config.get('splits_dir', '/content/dataset')
+    MODEL_NAME = config.get('model_name', 'hustvl/yolos-base')
     MAX_SIZE = config.get('MAX_SIZE', 640)
 
     # Add wandb folder support
