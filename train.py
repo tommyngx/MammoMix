@@ -1,10 +1,6 @@
 import argparse
 import os
-import sys
 
-# Force tqdm to work properly in all environments
-os.environ['TQDM_NOTEBOOK'] = '0'
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 # Suppress TensorFlow and CUDA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Tắt log của TensorFlow (0=verbose, 1=info, 2=warning, 3=error)
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Chỉ định GPU
@@ -153,14 +149,14 @@ def main(config_path, epoch=None, dataset=None):
         lr_scheduler_type=lr_scheduler_type,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
         eval_do_concat_batches=eval_do_concat_batches,
-        disable_tqdm=False,  # Ensure tqdm is enabled
-        #tqdm_disable=False,  # Additional tqdm setting
+        disable_tqdm=False,
         logging_dir=wandb_dir if wandb_dir else "./logs",
+        # Try with the original parameter names but with string values
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=save_total_limit,
         logging_strategy="epoch",
-        report_to=None if sys.stdout.isatty() else "all",  # Only report to wandb if not in terminal
+        report_to="all",
         load_best_model_at_end=True,
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
