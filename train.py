@@ -39,6 +39,12 @@ def main(config_path, epoch=None, dataset=None):
     MODEL_NAME = config.get('MODEL_NAME', 'hustvl/yolos-base')
     MAX_SIZE = config.get('MAX_SIZE', 640)
 
+    # Add wandb folder support
+    wandb_dir = None
+    if 'wandb' in config and 'wandb_dir' in config['wandb']:
+        wandb_dir = config['wandb']['wandb_dir']
+        print(f"Wandb directory: {wandb_dir}")
+
     image_processor = get_image_processor(MODEL_NAME, MAX_SIZE)
 
     # Get data directories from config

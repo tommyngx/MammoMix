@@ -2,7 +2,7 @@
 
 dataset:
   name: CSAW
-  splits_dir: /content/dataset
+  splits_dir: ../dataset
   max_size: 640
 
 model:
@@ -18,7 +18,7 @@ data:
   image_size: 512
 
 training:
-  output_dir: /content/runs
+  output_dir: ../tmp
   epochs: 30
   batch_size: 8
   learning_rate: 0.0001
@@ -45,3 +45,6 @@ logging:
   log_interval: 10
 
 seed: 42
+
+wandb:
+  wandb_dir: ../wandb
