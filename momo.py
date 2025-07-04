@@ -18,16 +18,16 @@ def merge_datasets(input_dir, output_name):
 
     # 2️⃣ Copy và thêm prefix tránh trùng tên
     print("📂 Copying files...")
-    for dataset in tqdm(datasets, desc="Processing datasets"):
+    for dataset_idx, dataset in enumerate(tqdm(datasets, desc="Processing datasets", position=0)):
         dataset_path = os.path.join(input_dir, dataset)
         if not os.path.exists(dataset_path):
-            print(f"⚠️ Bỏ qua {dataset}, không tồn tại trong {input_dir}.")
+            tqdm.write(f"⚠️ Bỏ qua {dataset}, không tồn tại trong {input_dir}.")
             continue
         for split in splits:
             img_dir = os.path.join(dataset_path, split, 'images')
             lbl_dir = os.path.join(dataset_path, split, 'labels')
             if not os.path.exists(img_dir) or not os.path.exists(lbl_dir):
-                print(f"⚠️ Bỏ qua {dataset}/{split}, thiếu images hoặc labels.")
+                tqdm.write(f"⚠️ Bỏ qua {dataset}/{split}, thiếu images hoặc labels.")
                 continue
 
             # Get file lists for progress tracking
@@ -35,14 +35,14 @@ def merge_datasets(input_dir, output_name):
             lbl_files = os.listdir(lbl_dir)
             
             # Copy images with progress bar
-            for fname in tqdm(img_files, desc=f"Copying {dataset}/{split} images", leave=False):
+            for fname in tqdm(img_files, desc=f"{dataset}/{split} images", leave=False, position=1):
                 src_img = os.path.join(img_dir, fname)
                 new_fname = f"{dataset}_{fname}"
                 dst_img = os.path.join(output_root, split, 'images', new_fname)
                 shutil.copy2(src_img, dst_img)
 
             # Copy labels with progress bar
-            for fname in tqdm(lbl_files, desc=f"Copying {dataset}/{split} labels", leave=False):
+            for fname in tqdm(lbl_files, desc=f"{dataset}/{split} labels", leave=False, position=1):
                 src_lbl = os.path.join(lbl_dir, fname)
                 new_fname = f"{dataset}_{fname}"
                 dst_lbl = os.path.join(output_root, split, 'labels', new_fname)
