@@ -1,6 +1,7 @@
 import os
 import shutil
 import argparse
+from tqdm import tqdm
 
 def merge_datasets(input_dir, output_name):
     datasets = ['CSAW', 'DMID', 'DDSM']
@@ -16,7 +17,8 @@ def merge_datasets(input_dir, output_name):
         os.makedirs(os.path.join(output_root, split, 'labels'), exist_ok=True)
 
     # 2️⃣ Copy và thêm prefix tránh trùng tên
-    for dataset in datasets:
+    print("📂 Copying files...")
+    for dataset in tqdm(datasets, desc="Processing datasets"):
         dataset_path = os.path.join(input_dir, dataset)
         if not os.path.exists(dataset_path):
             print(f"⚠️ Bỏ qua {dataset}, không tồn tại trong {input_dir}.")
@@ -28,20 +30,27 @@ def merge_datasets(input_dir, output_name):
                 print(f"⚠️ Bỏ qua {dataset}/{split}, thiếu images hoặc labels.")
                 continue
 
-            for fname in os.listdir(img_dir):
+            # Get file lists for progress tracking
+            img_files = os.listdir(img_dir)
+            lbl_files = os.listdir(lbl_dir)
+            
+            # Copy images with progress bar
+            for fname in tqdm(img_files, desc=f"Copying {dataset}/{split} images", leave=False):
                 src_img = os.path.join(img_dir, fname)
                 new_fname = f"{dataset}_{fname}"
                 dst_img = os.path.join(output_root, split, 'images', new_fname)
                 shutil.copy2(src_img, dst_img)
 
-            for fname in os.listdir(lbl_dir):
+            # Copy labels with progress bar
+            for fname in tqdm(lbl_files, desc=f"Copying {dataset}/{split} labels", leave=False):
                 src_lbl = os.path.join(lbl_dir, fname)
                 new_fname = f"{dataset}_{fname}"
                 dst_lbl = os.path.join(output_root, split, 'labels', new_fname)
                 shutil.copy2(src_lbl, dst_lbl)
 
     # 3️⃣ Gộp .txt
-    for split in splits:
+    print("📝 Merging text files...")
+    for split in tqdm(splits, desc="Merging split files"):
         merged_txt = os.path.join(output_root, f"{split}.txt")
         with open(merged_txt, 'w') as outfile:
             for dataset in datasets:
