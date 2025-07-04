@@ -7,6 +7,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Chỉ định GPU
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
+os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'  # Suppress Albumentations update warnings
 
 import pickle
 import numpy as np
