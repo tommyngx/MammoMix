@@ -2,7 +2,6 @@ import os
 import argparse
 import warnings
 import sys
-import yaml
 import datetime
 from pathlib import Path
 import pandas as pd
@@ -42,37 +41,28 @@ from utils import load_config, get_model_type
 from evaluation import get_eval_compute_metrics_fn
 
 def run_test(config_path, dataset_name, model_dir, epoch=None):
-    print(f"[INFO] Loading config from: {config_path}")
     config = load_config(config_path)
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
-    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
-    print(f"[INFO] SPLITS_DIR: {SPLITS_DIR}, MAX_SIZE: {MAX_SIZE}, MODEL_NAME: {MODEL_NAME}")
-
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
     dataloader_num_workers = training_cfg.get('num_workers', 2)
     remove_unused_columns = training_cfg.get('remove_unused_columns', False)
-    print(f"[INFO] Output dir: {output_dir}, Batch size: {per_device_eval_batch_size}")
 
-    # Load processor and model from model_dir
-    print(f"[INFO] Loading processor from: {model_dir}")
     image_processor = AutoImageProcessor.from_pretrained(model_dir)
-    print(f"[INFO] Loading model from: {model_dir}")
     model = AutoModelForObjectDetection.from_pretrained(
         model_dir,
         id2label={0: 'cancer'},
         label2id={'cancer': 0},
         auxiliary_loss=False,
     )
-    print(f"[INFO] Loaded model and processor.")
-
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
 
-    print(f"[INFO] Creating test dataset: split='test', splits_dir={SPLITS_DIR}, dataset_name={dataset_name}")
+    # Use model_type from config, not model_dir
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
     model_type_val = get_model_type(MODEL_NAME)
-    print(f"[INFO] model_type: {model_type_val}")
+
     test_dataset = BreastCancerDataset(
         split='test',
         splits_dir=SPLITS_DIR,
@@ -81,11 +71,9 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
         model_type=model_type_val,
         dataset_epoch=epoch
     )
-    print(f"[INFO] Test dataset created. Number of samples: {len(test_dataset)}")
 
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"{Path(model_dir).name}_{dataset_name}"
-    print(f"[INFO] Run name: {run_name}")
 
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -96,7 +84,6 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
         remove_unused_columns=remove_unused_columns,
         report_to=[],
     )
-    print(f"[INFO] TrainingArguments created.")
 
     trainer = Trainer(
         model=model,
@@ -106,25 +93,10 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
         data_collator=collate_fn,
         compute_metrics=eval_compute_metrics_fn,
     )
-    print(f"[INFO] Trainer created. Starting evaluation...")
 
-    try:
-        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-        print(f"[INFO] Evaluation done. Raw results: {test_results}")
-        # Only keep 4 digits for floats
-        test_results_fmt = {k: (f"{v:.4f}" if isinstance(v, float) else v) for k, v in test_results.items()}
-        return test_results_fmt
-    except Exception as e:
-        print(f"[ERROR] Exception during evaluation: {e}")
-        import traceback
-        traceback.print_exc()
-        # Debug: print a sample batch from test_dataset
-        try:
-            sample = test_dataset[0]
-            print("[DEBUG] Sample from test_dataset[0]:", sample)
-        except Exception as e2:
-            print("[DEBUG] Could not fetch sample from test_dataset[0]:", e2)
-        raise
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    test_results_fmt = {k: (f"{v:.4f}" if isinstance(v, float) else v) for k, v in test_results.items()}
+    return test_results_fmt
 
 def main():
     parser = argparse.ArgumentParser()
@@ -136,6 +108,34 @@ def main():
     parser.add_argument('--output_csv', type=str, default='test_all_results.csv', help='Output CSV file for merged results')
     args = parser.parse_args()
 
+    dataset_list = [d.strip() for d in args.datasets.split(',')]
+    model_list = [m.strip() for m in args.models.split(',')]
+
+    all_results = []
+    for dataset_name in dataset_list:
+        for model_name in model_list:
+            model_dir = os.path.join(args.weight_dir, model_name)
+            model_dir = os.path.abspath(model_dir)
+            print(f"\n=== Testing model '{model_dir}' on dataset '{dataset_name}' ===")
+            try:
+                result = run_test(args.config, dataset_name, model_dir, args.epoch)
+                result_row = {'dataset': dataset_name, 'model': model_name}
+                result_row.update(result)
+                all_results.append(result_row)
+            except Exception as e:
+                print(f"Error testing model '{model_dir}' on dataset '{dataset_name}': {e}")
+
+    if all_results:
+        df = pd.DataFrame(all_results)
+        print("\n=== Merged Results Table ===")
+        print(df.to_string(index=False))
+        df.to_csv(args.output_csv, index=False)
+        print(f"\nResults saved to {args.output_csv}")
+    else:
+        print("No results to display.")
+
+if __name__ == "__main__":
+    main()
     dataset_list = [d.strip() for d in args.datasets.split(',')]
     model_list = [m.strip() for m in args.models.split(',')]
 
