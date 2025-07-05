@@ -2,7 +2,7 @@ import os
 import argparse
 import warnings
 
-# Suppress TensorFlow, CUDA, and absl warnings
+# Suppress TensorFlow, CUDA, absl, and XLA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
@@ -11,6 +11,22 @@ os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
 os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
 os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['ABSL_LOG_LEVEL'] = '3'  # Suppress absl logging
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
+# Redirect absl and XLA warnings to /dev/null (works on Linux/Unix)
+import sys
+import logging
+import contextlib
+
+class DevNull:
+    def write(self, msg):
+        pass
+    def flush(self):
+        pass
+
+# Suppress absl and XLA warnings at runtime
+sys.stderr = DevNull()
 
 warnings.filterwarnings("ignore")
 
