@@ -42,39 +42,50 @@ from utils import load_config, get_model_type
 from evaluation import get_eval_compute_metrics_fn
 
 def run_test(config_path, dataset_name, model_dir, epoch=None):
+    print(f"[INFO] Loading config from: {config_path}")
     config = load_config(config_path)
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
     MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    print(f"[INFO] SPLITS_DIR: {SPLITS_DIR}, MAX_SIZE: {MAX_SIZE}, MODEL_NAME: {MODEL_NAME}")
 
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
     dataloader_num_workers = training_cfg.get('num_workers', 2)
     remove_unused_columns = training_cfg.get('remove_unused_columns', False)
+    print(f"[INFO] Output dir: {output_dir}, Batch size: {per_device_eval_batch_size}")
 
     # Load processor and model from model_dir
+    print(f"[INFO] Loading processor from: {model_dir}")
     image_processor = AutoImageProcessor.from_pretrained(model_dir)
+    print(f"[INFO] Loading model from: {model_dir}")
     model = AutoModelForObjectDetection.from_pretrained(
         model_dir,
         id2label={0: 'cancer'},
         label2id={'cancer': 0},
         auxiliary_loss=False,
     )
+    print(f"[INFO] Loaded model and processor.")
+
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
 
+    print(f"[INFO] Creating test dataset: split='test', splits_dir={SPLITS_DIR}, dataset_name={dataset_name}")
+    model_type_val = get_model_type(MODEL_NAME)
+    print(f"[INFO] model_type: {model_type_val}")
     test_dataset = BreastCancerDataset(
         split='test',
         splits_dir=SPLITS_DIR,
         dataset_name=dataset_name,
         image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
+        model_type=model_type_val,
         dataset_epoch=epoch
     )
+    print(f"[INFO] Test dataset created. Number of samples: {len(test_dataset)}")
 
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"{Path(model_dir).name}_{dataset_name}"
-    print(f"Run name: {run_name, model_dir, dataset_name}")
+    print(f"[INFO] Run name: {run_name}")
 
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -85,6 +96,7 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
         remove_unused_columns=remove_unused_columns,
         report_to=[],
     )
+    print(f"[INFO] TrainingArguments created.")
 
     trainer = Trainer(
         model=model,
@@ -94,8 +106,10 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
         data_collator=collate_fn,
         compute_metrics=eval_compute_metrics_fn,
     )
+    print(f"[INFO] Trainer created. Starting evaluation...")
 
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    print(f"[INFO] Evaluation done. Raw results: {test_results}")
     # Only keep 4 digits for floats
     test_results_fmt = {k: (f"{v:.4f}" if isinstance(v, float) else v) for k, v in test_results.items()}
     return test_results_fmt
