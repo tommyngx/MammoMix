@@ -23,7 +23,7 @@ def merge_datasets(input_dir, output_name):
         if not os.path.exists(dataset_path):
             print(f"⚠️ Bỏ qua {dataset}, không tồn tại trong {input_dir}.")
             continue
-        for split_idx, split in enumerate(splits):
+        for split in splits:
             img_dir = os.path.join(dataset_path, split, 'images')
             lbl_dir = os.path.join(dataset_path, split, 'labels')
             if not os.path.exists(img_dir) or not os.path.exists(lbl_dir):
@@ -33,33 +33,20 @@ def merge_datasets(input_dir, output_name):
             img_files = os.listdir(img_dir)
             lbl_files = os.listdir(lbl_dir)
             
-            # Only show tqdm for the first split of each dataset
-            if split_idx == 0:
-                print(f"Copying {dataset}/{split} images...")
-                for fname in tqdm(img_files, desc=f"{dataset}/{split} images", ncols=80):
-                    src_img = os.path.join(img_dir, fname)
-                    new_fname = f"{dataset}_{fname}"
-                    dst_img = os.path.join(output_root, split, 'images', new_fname)
-                    shutil.copy2(src_img, dst_img)
-                print(f"Copying {dataset}/{split} labels...")
-                for fname in tqdm(lbl_files, desc=f"{dataset}/{split} labels", ncols=80):
-                    src_lbl = os.path.join(lbl_dir, fname)
-                    new_fname = f"{dataset}_{fname}"
-                    dst_lbl = os.path.join(output_root, split, 'labels', new_fname)
-                    shutil.copy2(src_lbl, dst_lbl)
-            else:
-                print(f"Copying {dataset}/{split} images...")
-                for fname in img_files:
-                    src_img = os.path.join(img_dir, fname)
-                    new_fname = f"{dataset}_{fname}"
-                    dst_img = os.path.join(output_root, split, 'images', new_fname)
-                    shutil.copy2(src_img, dst_img)
-                print(f"Copying {dataset}/{split} labels...")
-                for fname in lbl_files:
-                    src_lbl = os.path.join(lbl_dir, fname)
-                    new_fname = f"{dataset}_{fname}"
-                    dst_lbl = os.path.join(output_root, split, 'labels', new_fname)
-                    shutil.copy2(src_lbl, dst_lbl)
+            # Copy images with progress bar (single bar, not nested)
+            print(f"Copying {dataset}/{split} images...")
+            for fname in tqdm(img_files, desc=f"{dataset}/{split} images", ncols=80):
+                src_img = os.path.join(img_dir, fname)
+                new_fname = f"{dataset}_{fname}"
+                dst_img = os.path.join(output_root, split, 'images', new_fname)
+                shutil.copy2(src_img, dst_img)
+
+            print(f"Copying {dataset}/{split} labels...")
+            for fname in tqdm(lbl_files, desc=f"{dataset}/{split} labels", ncols=80):
+                src_lbl = os.path.join(lbl_dir, fname)
+                new_fname = f"{dataset}_{fname}"
+                dst_lbl = os.path.join(output_root, split, 'labels', new_fname)
+                shutil.copy2(src_lbl, dst_lbl)
 
     # 3️⃣ Gộp .txt
     print("📝 Merging text files...")
