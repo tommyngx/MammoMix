@@ -141,6 +141,12 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
         remove_unused_columns=remove_unused_columns,
     )
 
+    # Determine model weight directory
+    if weight_dir is not None:
+        model_dir = weight_dir
+    else:
+        model_dir = f'./yolos_{DATASET_NAME}'
+
     trainer = Trainer(
         model=model,
         args=training_args,
