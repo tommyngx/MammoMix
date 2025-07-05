@@ -43,7 +43,7 @@ class ModelOutput:
     pred_boxes: torch.Tensor
 
 @torch.no_grad()
-def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label=None):
+def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label=None, MAX_SIZE = 640):
     '''
     Compute mean average mAP, mAR and their variants for the object detection task.
     '''
@@ -53,7 +53,8 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
     predictions, targets = evaluation_results.predictions, evaluation_results.label_ids
 
     for batch in targets:
-        batch_image_sizes = torch.tensor(np.array([x['size'] for x in batch]))
+        #batch_image_sizes = torch.tensor(np.array([x['size'] for x in batch]))
+        batch_image_sizes = torch.tensor(np.array([[MAX_SIZE, MAX_SIZE] for _ in batch]))
         image_sizes.append(batch_image_sizes)
         for image_target in batch:
             boxes = torch.tensor(image_target['boxes'])
