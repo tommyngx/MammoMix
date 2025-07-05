@@ -73,6 +73,7 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
 
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"{Path(model_dir).name}_{dataset_name}"
+    print(f"Run name: {run_name, model_dir, dataset_name}")
 
     training_args = TrainingArguments(
         output_dir=output_dir,
