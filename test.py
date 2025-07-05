@@ -26,6 +26,16 @@ from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn
 
+# Suppress TensorFlow and CUDA warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Tắt log của TensorFlow (0=verbose, 1=info, 2=warning, 3=error)
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Chỉ định GPU
+os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
+os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'  # Suppress Albumentations update warnings
+
+
+
 def load_config(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -43,8 +53,10 @@ def main(config_path, epoch=None, dataset=None):
     if 'wandb' in config and 'wandb_dir' in config['wandb']:
         wandb_dir = config['wandb']['wandb_dir']
 
-    # Load training arguments from config
-    #num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
+    # Fix: get training_cfg from config
+    training_cfg = config.get('training', {})
+    output_dir = training_cfg.get('output_dir', '/tmp')
+    num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
     per_device_train_batch_size = training_cfg.get('batch_size', 8)
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
     learning_rate = training_cfg.get('learning_rate', 5e-5)
