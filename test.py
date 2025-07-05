@@ -13,6 +13,8 @@ os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['ABSL_LOG_LEVEL'] = '3'  # Suppress absl logging
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GLOG_minloglevel"] = "2"
 
 # Redirect absl and XLA warnings to /dev/null (works on Linux/Unix)
 import sys
