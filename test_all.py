@@ -108,11 +108,23 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
     )
     print(f"[INFO] Trainer created. Starting evaluation...")
 
-    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-    print(f"[INFO] Evaluation done. Raw results: {test_results}")
-    # Only keep 4 digits for floats
-    test_results_fmt = {k: (f"{v:.4f}" if isinstance(v, float) else v) for k, v in test_results.items()}
-    return test_results_fmt
+    try:
+        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+        print(f"[INFO] Evaluation done. Raw results: {test_results}")
+        # Only keep 4 digits for floats
+        test_results_fmt = {k: (f"{v:.4f}" if isinstance(v, float) else v) for k, v in test_results.items()}
+        return test_results_fmt
+    except Exception as e:
+        print(f"[ERROR] Exception during evaluation: {e}")
+        import traceback
+        traceback.print_exc()
+        # Debug: print a sample batch from test_dataset
+        try:
+            sample = test_dataset[0]
+            print("[DEBUG] Sample from test_dataset[0]:", sample)
+        except Exception as e2:
+            print("[DEBUG] Could not fetch sample from test_dataset[0]:", e2)
+        raise
 
 def main():
     parser = argparse.ArgumentParser()
