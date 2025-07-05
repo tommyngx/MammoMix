@@ -58,7 +58,8 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
         image_sizes.append(batch_image_sizes)
         for image_target in batch:
             boxes = torch.tensor(image_target['boxes'])
-            boxes = convert_bbox_yolo_to_pascal(boxes, image_target['size'])
+            #boxes = convert_bbox_yolo_to_pascal(boxes, image_target['size'])
+            boxes = convert_bbox_yolo_to_pascal(boxes, [MAX_SIZE, MAX_SIZE])
             labels = torch.tensor(image_target['class_labels'])
             post_processed_targets.append({'boxes': boxes, 'labels': labels})
 
