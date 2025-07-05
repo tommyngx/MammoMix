@@ -44,7 +44,7 @@ def main(config_path, epoch=None, dataset=None):
         wandb_dir = config['wandb']['wandb_dir']
 
     # Load training arguments from config
-    num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
+    #num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
     per_device_train_batch_size = training_cfg.get('batch_size', 8)
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
     learning_rate = training_cfg.get('learning_rate', 5e-5)
