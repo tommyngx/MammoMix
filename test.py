@@ -55,7 +55,7 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def main(config_path, epoch=None, dataset=None):
+def main(config_path, epoch=None, dataset=None, weight_dir=None):
     config = load_config(config_path)
     DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
@@ -122,7 +122,21 @@ def main(config_path, epoch=None, dataset=None):
         remove_unused_columns=remove_unused_columns,
     )
 
-    image_processor = get_image_processor(MODEL_NAME, MAX_SIZE)
+    # Determine model weight directory
+    if weight_dir is not None:
+        model_dir = weight_dir
+    else:
+        model_dir = f'./yolos_{DATASET_NAME}'
+
+    # Load model and processor from the specified directory
+    image_processor = AutoImageProcessor.from_pretrained(model_dir)
+    model = AutoModelForObjectDetection.from_pretrained(
+        model_dir,
+        id2label={0: 'cancer'},
+        label2id={'cancer': 0},
+        auxiliary_loss=False,
+    )
+
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
 
     train_dataset = BreastCancerDataset(
@@ -140,13 +154,6 @@ def main(config_path, epoch=None, dataset=None):
         image_processor=image_processor,
         model_type=get_model_type(MODEL_NAME),
         dataset_epoch=epoch
-    )
-
-    model = AutoModelForObjectDetection.from_pretrained(
-        f'./yolos_{DATASET_NAME}',
-        id2label={0: 'cancer'},
-        label2id={'cancer': 0},
-        auxiliary_loss=False,
     )
 
     trainer = Trainer(
@@ -178,5 +185,6 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
     args = parser.parse_args()
-    main(args.config, args.epoch, args.dataset)
+    main(args.config, args.epoch, args.dataset, args.weight_dir)
