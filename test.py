@@ -112,7 +112,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
         save_strategy="epoch",
         save_total_limit=save_total_limit,
         logging_strategy="epoch",
-        report_to="all",
+        report_to=[],  # Disable wandb and all external loggers for testing
         load_best_model_at_end=True,
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
