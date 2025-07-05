@@ -228,6 +228,19 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
     acc = (val_preds == y_val).mean()
     print(f"MoE (top-2) validation accuracy: {acc:.4f}")
 
+# To train the MoE model, run this script from the terminal:
+# Example:
+# python train_moe.py --config configs/train_config.yaml --weight_dir /path/to/weights
+
+# Arguments:
+# --config: Path to your config YAML file.
+# --weight_dir: Path to directory containing yolos_CSAW, yolos_DMID, yolos_DDSM subfolders.
+# --epoch: (optional) Dataset epoch value to pass to dataset.
+# --dataset: (optional) Dataset name to use (overrides config).
+
+# Example command:
+# python train_moe.py --config configs/train_config.yaml --weight_dir ./weights
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
