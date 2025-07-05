@@ -45,6 +45,7 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
     config = load_config(config_path)
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
 
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
@@ -67,7 +68,7 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
         splits_dir=SPLITS_DIR,
         dataset_name=dataset_name,
         image_processor=image_processor,
-        model_type=get_model_type(model_dir),
+        model_type=get_model_type(MODEL_NAME),
         dataset_epoch=epoch
     )
 
