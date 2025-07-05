@@ -44,8 +44,6 @@ def main(config_path, epoch=None, dataset=None):
         wandb_dir = config['wandb']['wandb_dir']
 
     # Load training arguments from config
-    training_cfg = config.get('training', {})
-    output_dir = training_cfg.get('output_dir', '/tmp')
     num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
     per_device_train_batch_size = training_cfg.get('batch_size', 8)
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
@@ -68,6 +66,7 @@ def main(config_path, epoch=None, dataset=None):
 
     training_args = TrainingArguments(
         output_dir=output_dir,
+        run_name=run_name,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
@@ -79,11 +78,13 @@ def main(config_path, epoch=None, dataset=None):
         eval_do_concat_batches=eval_do_concat_batches,
         disable_tqdm=False,
         logging_dir=wandb_dir if wandb_dir else "./logs",
-        evaluation_strategy=evaluation_strategy,
-        save_strategy=save_strategy,
+        # Try with the original parameter names but with string values
+        eval_strategy="epoch",
+        save_strategy="epoch",
         save_total_limit=save_total_limit,
-        logging_strategy=logging_strategy,
-        load_best_model_at_end=load_best_model_at_end,
+        logging_strategy="epoch",
+        report_to="all",
+        load_best_model_at_end=True,
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
         fp16=torch.cuda.is_available(),
