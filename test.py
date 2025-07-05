@@ -33,15 +33,20 @@ def load_config(config_path):
 
 def main(config_path, epoch=None, dataset=None):
     config = load_config(config_path)
-    DATASET_NAME = dataset if dataset is not None else config.get('DATASET_NAME', 'CSAW')
-    SPLITS_DIR = config.get('SPLITS_DIR', '/content/dataset')
-    MODEL_NAME = config.get('MODEL_NAME', 'hustvl/yolos-base')
-    MAX_SIZE = config.get('MAX_SIZE', 640)
+    DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
 
-    # Prioritize CLI arguments for training config as well
+    # Add wandb folder support (optional, for consistency)
+    wandb_dir = None
+    if 'wandb' in config and 'wandb_dir' in config['wandb']:
+        wandb_dir = config['wandb']['wandb_dir']
+
+    # Load training arguments from config
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
-    num_train_epochs = training_cfg.get('epochs', 20)
+    num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
     per_device_train_batch_size = training_cfg.get('batch_size', 8)
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
     learning_rate = training_cfg.get('learning_rate', 5e-5)
@@ -72,6 +77,8 @@ def main(config_path, epoch=None, dataset=None):
         lr_scheduler_type=lr_scheduler_type,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
         eval_do_concat_batches=eval_do_concat_batches,
+        disable_tqdm=False,
+        logging_dir=wandb_dir if wandb_dir else "./logs",
         evaluation_strategy=evaluation_strategy,
         save_strategy=save_strategy,
         save_total_limit=save_total_limit,
@@ -109,10 +116,7 @@ def main(config_path, epoch=None, dataset=None):
         f'./yolos_{DATASET_NAME}',
         id2label={0: 'cancer'},
         label2id={'cancer': 0},
-        #num_queries=3,
         auxiliary_loss=False,
-        #use_pretrained_backbone=False,
-        #ignore_mismatched_sizes=True,
     )
 
     trainer = Trainer(
@@ -134,7 +138,10 @@ def main(config_path, epoch=None, dataset=None):
         dataset_epoch=epoch
     )
     print(f'Test loader: {len(test_dataset)} samples')
-    trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    print("\n=== Test Results ===")
+    for key, value in test_results.items():
+        print(f"{key}: {value}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
