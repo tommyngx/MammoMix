@@ -124,7 +124,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
 
     # Determine model weight directory
     if weight_dir is not None:
-        model_dir =  f'{weight_dir}/yolos_{DATASET_NAME}'
+        model_dir = weight_dir
     else:
         model_dir = f'./yolos_{DATASET_NAME}'
 
