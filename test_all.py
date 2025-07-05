@@ -215,7 +215,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        print("No results to display.")
-
-if __name__ == "__main__":
-    main()
