@@ -1,5 +1,19 @@
 import os
 import argparse
+import warnings
+
+# Suppress TensorFlow, CUDA, and absl warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
+os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
+os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+warnings.filterwarnings("ignore")
+
 import torch
 import pickle
 import numpy as np
@@ -53,7 +67,6 @@ def main(config_path, epoch=None, dataset=None):
     if 'wandb' in config and 'wandb_dir' in config['wandb']:
         wandb_dir = config['wandb']['wandb_dir']
 
-    # Fix: get training_cfg from config
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
     num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
@@ -76,6 +89,11 @@ def main(config_path, epoch=None, dataset=None):
     gradient_accumulation_steps = training_cfg.get('gradient_accumulation_steps', 2)
     remove_unused_columns = training_cfg.get('remove_unused_columns', False)
 
+    # Fix: define run_name for TrainingArguments
+    import datetime
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"{MODEL_NAME.replace('/', '_')}_{DATASET_NAME}_{date_str}"
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         run_name=run_name,
@@ -90,7 +108,6 @@ def main(config_path, epoch=None, dataset=None):
         eval_do_concat_batches=eval_do_concat_batches,
         disable_tqdm=False,
         logging_dir=wandb_dir if wandb_dir else "./logs",
-        # Try with the original parameter names but with string values
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=save_total_limit,
