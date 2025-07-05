@@ -185,19 +185,14 @@ def main():
     for model_name in model_list:
         model_dir = os.path.join(args.weight_dir, model_name)
         model_dir = os.path.abspath(model_dir)
-        # Determine which datasets to test for this model
-        if model_name.endswith("MOMO"):
+        # Test on all datasets if model_name does not match any dataset name (case-insensitive)
+        datasets_to_test = []
+        for ds in dataset_list:
+            if model_name.lower().endswith(ds.lower()):
+                datasets_to_test = [ds]
+                break
+        if not datasets_to_test:
             datasets_to_test = dataset_list
-        else:
-            # Extract dataset name from model_name (assume format: yolos_DATASET)
-            # Use the last part after '_' or the last part after '-' if present
-            if "_" in model_name:
-                ds_name = model_name.split("_")[-1]
-            elif "-" in model_name:
-                ds_name = model_name.split("-")[-1]
-            else:
-                ds_name = model_name
-            datasets_to_test = [ds_name]
         for dataset_name in datasets_to_test:
             print(f"\n=== Testing model '{model_dir}' on dataset '{dataset_name}' ===")
             try:
@@ -214,6 +209,11 @@ def main():
         print(df.to_string(index=False))
         df.to_csv(args.output_csv, index=False)
         print(f"\nResults saved to {args.output_csv}")
+    else:
+        print("No results to display.")
+
+if __name__ == "__main__":
+    main()
     else:
         print("No results to display.")
 
