@@ -60,6 +60,11 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
     MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
     MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
 
+    # Add wandb folder support (optional, for consistency)
+    wandb_dir = None
+    if 'wandb' in config and 'wandb_dir' in config['wandb']:
+        wandb_dir = config['wandb']['wandb_dir']
+
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
     num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
