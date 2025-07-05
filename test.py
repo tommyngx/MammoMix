@@ -196,7 +196,10 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     print("\n=== Test Results ===")
     for key, value in test_results.items():
-        print(f"{key}: {value}")
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
