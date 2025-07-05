@@ -102,7 +102,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
     parser.add_argument('--datasets', type=str, required=True, help='Comma-separated list of dataset names (e.g. CSAW,DDSM,DMID)')
-    parser.add_argument('--models', type=str, required=True, help='Comma-separated list of model directories (e.g. yolos_CSAW,yolos_DDSM)')
+    parser.add_argument('--weight_dir', type=str, required=True, help='Path to directory containing model subfolders')
+    parser.add_argument('--models', type=str, required=True, help='Comma-separated list of model subfolder names (e.g. yolos_CSAW,yolos_DDSM)')
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--output_csv', type=str, default='test_all_results.csv', help='Output CSV file for merged results')
     args = parser.parse_args()
@@ -112,11 +113,12 @@ def main():
 
     all_results = []
     for dataset_name in dataset_list:
-        for model_dir in model_list:
+        for model_name in model_list:
+            model_dir = os.path.join(args.weight_dir, model_name)
             print(f"\n=== Testing model '{model_dir}' on dataset '{dataset_name}' ===")
             try:
                 result = run_test(args.config, dataset_name, model_dir, args.epoch)
-                result_row = {'dataset': dataset_name, 'model': model_dir}
+                result_row = {'dataset': dataset_name, 'model': model_name}
                 result_row.update(result)
                 all_results.append(result_row)
             except Exception as e:
