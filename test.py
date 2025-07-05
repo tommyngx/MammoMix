@@ -11,28 +11,24 @@ os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
 os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
 os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['ABSL_LOG_LEVEL'] = '3'
+os.environ['ABSL_LOG_LEVEL'] = '3'  # Suppress absl logging
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
-warnings.filterwarnings("ignore")
-
-# --- Suppress absl and XLA warnings at runtime ---
+# Redirect absl and XLA warnings to /dev/null (works on Linux/Unix)
 import sys
+import logging
+import contextlib
 
 class DevNull:
     def write(self, msg):
-        # Only suppress lines containing "Unable to register" or "All log messages before absl"
-        if (
-            "Unable to register" in msg
-            or "All log messages before absl" in msg
-            or "external/local_xla" in msg
-        ):
-            return
-        sys.__stderr__.write(msg)
+        pass
     def flush(self):
-        sys.__stderr__.flush()
+        pass
 
+# Suppress absl and XLA warnings at runtime
 sys.stderr = DevNull()
+
+warnings.filterwarnings("ignore")
 
 import torch
 import pickle
