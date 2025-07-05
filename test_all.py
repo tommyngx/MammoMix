@@ -114,7 +114,9 @@ def main():
     all_results = []
     for dataset_name in dataset_list:
         for model_name in model_list:
+            # Fix: model_dir is weight_dir + model_name (ensure no double slash)
             model_dir = os.path.join(args.weight_dir, model_name)
+            model_dir = os.path.abspath(model_dir)
             print(f"\n=== Testing model '{model_dir}' on dataset '{dataset_name}' ===")
             try:
                 result = run_test(args.config, dataset_name, model_dir, args.epoch)
