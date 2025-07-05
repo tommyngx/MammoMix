@@ -68,8 +68,8 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
     num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
-    per_device_train_batch_size = training_cfg.get('batch_size', 8)
-    per_device_eval_batch_size = training_cfg.get('batch_size', 8)
+    per_device_train_batch_size = training_cfg.get('batch_size', 4)
+    per_device_eval_batch_size = training_cfg.get('batch_size', 4)
     learning_rate = training_cfg.get('learning_rate', 5e-5)
     weight_decay = training_cfg.get('weight_decay', 1e-4)
     warmup_ratio = training_cfg.get('warmup_ratio', 0.05)
@@ -206,15 +206,15 @@ def main():
     if all_results:
         df = pd.DataFrame(all_results)
         print("\n=== Merged Results Table ===")
-        print(df.to_string(index=False))
-        df.to_csv(args.output_csv, index=False)
+        df = df.set_index(['dataset', 'model']).T  # Reverse: metrics as rows, dataset/model as columns
+        print(df.to_string())
+        df.to_csv(args.output_csv)
         print(f"\nResults saved to {args.output_csv}")
     else:
         print("No results to display.")
 
 if __name__ == "__main__":
     main()
-    else:
         print("No results to display.")
 
 if __name__ == "__main__":
