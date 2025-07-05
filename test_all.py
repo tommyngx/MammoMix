@@ -67,12 +67,12 @@ def run_test(config_path, dataset_name, model_dir, epoch=None):
         splits_dir=SPLITS_DIR,
         dataset_name=dataset_name,
         image_processor=image_processor,
-        model_type=get_model_type(config.get('model', {}).get('model_name', 'detr')),  # Fix: use model_name from config, not model_dir
+        model_type=get_model_type(model_dir),
         dataset_epoch=epoch
     )
 
     date_str = datetime.datetime.now().strftime("%d%m%y")
-    run_name = f"{Path(model_dir).name}_{dataset_name}_{date_str}"
+    run_name = f"{Path(model_dir).name}_{dataset_name}"
 
     training_args = TrainingArguments(
         output_dir=output_dir,
