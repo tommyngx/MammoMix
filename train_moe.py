@@ -589,8 +589,33 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
                         print(f"DEBUG: First restructured boxes type: {type(restructured_labels[0]['boxes'])}")
                         print(f"DEBUG: First restructured boxes shape: {restructured_labels[0]['boxes'].shape}")
         
-        # Call the original evaluation function
-        return eval_compute_metrics_fn(eval_pred)
+        # Create a custom evaluation function that has extra debugging
+        def debug_eval_compute_metrics_fn(eval_pred):
+            """Debug version of the evaluation function"""
+            print(f"DEBUG inside eval_compute_metrics_fn: eval_pred type: {type(eval_pred)}")
+            print(f"DEBUG inside eval_compute_metrics_fn: label_ids type: {type(eval_pred.label_ids)}")
+            print(f"DEBUG inside eval_compute_metrics_fn: label_ids length: {len(eval_pred.label_ids)}")
+            
+            if len(eval_pred.label_ids) > 0:
+                first_target = eval_pred.label_ids[0]
+                print(f"DEBUG inside eval_compute_metrics_fn: first_target type: {type(first_target)}")
+                print(f"DEBUG inside eval_compute_metrics_fn: first_target: {first_target}")
+                
+                if isinstance(first_target, dict):
+                    print(f"DEBUG inside eval_compute_metrics_fn: first_target keys: {first_target.keys()}")
+                    if 'boxes' in first_target:
+                        print(f"DEBUG inside eval_compute_metrics_fn: boxes type: {type(first_target['boxes'])}")
+                        print(f"DEBUG inside eval_compute_metrics_fn: boxes value: {first_target['boxes']}")
+                    else:
+                        print("DEBUG inside eval_compute_metrics_fn: 'boxes' key not found!")
+                else:
+                    print(f"DEBUG inside eval_compute_metrics_fn: first_target is not a dict, it's a {type(first_target)}")
+            
+            # Call the original evaluation function
+            return eval_compute_metrics_fn(eval_pred)
+        
+        # Call the debug version instead
+        return debug_eval_compute_metrics_fn(eval_pred)
     
     trainer = Trainer(
         model=moe_detector,
