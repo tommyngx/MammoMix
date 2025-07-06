@@ -352,11 +352,23 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         print(f"Random sample index: {random_idx}")
         print(f"Ground truth:")
         gt_labels = random_sample['labels']
+        print(f"  Labels type: {type(gt_labels)}")
+        print(f"  Labels content: {gt_labels}")
+        
         if isinstance(gt_labels, dict):
             print(f"  Image ID: {gt_labels.get('image_id', 'N/A')}")
             gt_boxes = gt_labels.get('boxes', [])
             print(f"  GT Boxes: {gt_boxes}")
             print(f"  GT Classes: {gt_labels.get('class_labels', [])}")
+            print(f"  GT Areas: {gt_labels.get('area', [])}")
+        else:
+            # Handle BatchFeature case
+            if hasattr(gt_labels, 'data'):
+                print(f"  BatchFeature data keys: {gt_labels.data.keys()}")
+                for key, value in gt_labels.data.items():
+                    print(f"    {key}: {value}")
+            else:
+                print(f"  GT Labels (unknown format): {gt_labels}")
         
         # Get predictions from expert
         pixel_values_single = random_sample['pixel_values'].unsqueeze(0).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
