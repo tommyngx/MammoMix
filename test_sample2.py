@@ -437,30 +437,3 @@ if __name__ == "__main__":
         args.num_samples = int(args.num_samples)
     
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model, args.one_testing)
-            improvement = moe_map - expert_map
-            improvement_pct = (improvement / expert_map) * 100 if expert_map != 0 else 0
-            print(f"mAP Improvement: {improvement:.4f} ({improvement_pct:+.2f}%)")
-        
-        if expert_results and isinstance(expert_map_50, float) and isinstance(moe_map_50, float):
-            improvement_50 = moe_map_50 - expert_map_50
-            improvement_50_pct = (improvement_50 / expert_map_50) * 100 if expert_map_50 != 0 else 0
-            print(f"mAP@50 Improvement: {improvement_50:.4f} ({improvement_50_pct:+.2f}%)")
-    else:
-        print("MoE: Not tested or failed")
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
-    parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
-    parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
-    parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
-    parser.add_argument('--num_samples', default=8, help='Number of test samples to use (or "all" for full dataset)')
-    parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
-    parser.add_argument('--one_testing', action='store_true', help='Only run single random sample comparison test')
-    args = parser.parse_args()
-    
-    # Convert num_samples to int if it's not "all"
-    if args.num_samples != 'all':
-        args.num_samples = int(args.num_samples)
-    
-    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model, args.one_testing)
