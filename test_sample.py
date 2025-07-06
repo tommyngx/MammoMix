@@ -1,352 +1,233 @@
-import argparse
 import os
-from pathlib import Path
-import numpy as np
-import yaml
-import torch
-from transformers import AutoImageProcessor, AutoModelForObjectDetection, Trainer, TrainingArguments
+import argparse
+import warnings
 
-# Suppress TensorFlow and CUDA warnings
+# Suppress TensorFlow, CUDA, absl, and XLA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
 os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
+os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['ABSL_LOG_LEVEL'] = '3'  # Suppress absl logging
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GLOG_minloglevel"] = "2"
 
-# Import everything from test.py that we need
+# Redirect absl and XLA warnings to /dev/null (works on Linux/Unix)
+import sys
+import logging
+import contextlib
+
+class DevNull:
+    def write(self, msg):
+        pass
+    def flush(self):
+        pass
+
+# Suppress absl and XLA warnings at runtime
+sys.stderr = DevNull()
+
+warnings.filterwarnings("ignore")
+
+import torch
+import pickle
+import numpy as np
+import albumentations as A
+import xml.etree.ElementTree as ET
+import yaml
+from pathlib import Path
+from functools import partial
+from dataclasses import dataclass
+from sklearn.linear_model import LinearRegression
+
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader
+from torchvision.ops import box_iou
+
+from transformers import (
+    AutoImageProcessor,
+    AutoModelForObjectDetection,
+    TrainingArguments,
+    Trainer,
+    EarlyStoppingCallback,
+)
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn
 
-# Import MoE components
-from train_moe import IntegratedMoE, MoEObjectDetectionModel, get_yolos_model
+# Suppress TensorFlow and CUDA warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Tắt log của TensorFlow (0=verbose, 1=info, 2=warning, 3=error)
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Chỉ định GPU
+os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
+os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'  # Suppress Albumentations update warnings
 
-def test_single_expert(expert_path, dataset_name, splits_dir, num_samples=16, epoch=None):
-    """Test a single expert model - copied from test.py structure"""
-    
-    # Load model and processor exactly like test.py
-    image_processor = AutoImageProcessor.from_pretrained(expert_path)
+
+
+def load_config(config_path):
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
+
+def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8):
+    config = load_config(config_path)
+    DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
+
+    # Add wandb folder support (optional, for consistency)
+    wandb_dir = None
+    if 'wandb' in config and 'wandb_dir' in config['wandb']:
+        wandb_dir = config['wandb']['wandb_dir']
+
+    training_cfg = config.get('training', {})
+    output_dir = training_cfg.get('output_dir', '/tmp')
+    num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
+    per_device_train_batch_size = training_cfg.get('batch_size', 8)
+    per_device_eval_batch_size = training_cfg.get('batch_size', 8)
+    learning_rate = training_cfg.get('learning_rate', 5e-5)
+    weight_decay = training_cfg.get('weight_decay', 1e-4)
+    warmup_ratio = training_cfg.get('warmup_ratio', 0.05)
+    lr_scheduler_type = training_cfg.get('lr_scheduler_type', 'cosine_with_restarts')
+    lr_scheduler_kwargs = training_cfg.get('lr_scheduler_kwargs', dict(num_cycles=1))
+    eval_do_concat_batches = training_cfg.get('eval_do_concat_batches', False)
+    evaluation_strategy = training_cfg.get('evaluation_strategy', 'epoch')
+    save_strategy = training_cfg.get('save_strategy', 'epoch')
+    save_total_limit = training_cfg.get('save_total_limit', 1)
+    logging_strategy = training_cfg.get('logging_strategy', 'epoch')
+    load_best_model_at_end = training_cfg.get('load_best_model_at_end', True)
+    metric_for_best_model = training_cfg.get('metric_for_best_model', 'eval_map_50')
+    greater_is_better = training_cfg.get('greater_is_better', True)
+    dataloader_num_workers = training_cfg.get('num_workers', 2)
+    gradient_accumulation_steps = training_cfg.get('gradient_accumulation_steps', 2)
+    remove_unused_columns = training_cfg.get('remove_unused_columns', False)
+
+    # Fix: define run_name for TrainingArguments
+    import datetime
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"{MODEL_NAME.replace('/', '_')}_{DATASET_NAME}_{date_str}"
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        run_name=run_name,
+        num_train_epochs=num_train_epochs,
+        per_device_train_batch_size=per_device_train_batch_size,
+        per_device_eval_batch_size=per_device_eval_batch_size,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        warmup_ratio=warmup_ratio,
+        lr_scheduler_type=lr_scheduler_type,
+        lr_scheduler_kwargs=lr_scheduler_kwargs,
+        eval_do_concat_batches=eval_do_concat_batches,
+        disable_tqdm=False,
+        logging_dir=wandb_dir if wandb_dir else "./logs",
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=save_total_limit,
+        logging_strategy="epoch",
+        report_to=[],  # Disable wandb and all external loggers for testing
+        load_best_model_at_end=True,
+        metric_for_best_model=metric_for_best_model,
+        greater_is_better=greater_is_better,
+        fp16=torch.cuda.is_available(),
+        dataloader_num_workers=dataloader_num_workers,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        remove_unused_columns=remove_unused_columns,
+    )
+
+    # Determine model weight directory
+    if weight_dir is not None:
+        model_dir = weight_dir
+    else:
+        model_dir = f'./yolos_{DATASET_NAME}'
+
+    # Load model and processor from the specified directory
+    image_processor = AutoImageProcessor.from_pretrained(model_dir)
     model = AutoModelForObjectDetection.from_pretrained(
-        expert_path,
+        model_dir,
         id2label={0: 'cancer'},
         label2id={'cancer': 0},
         auxiliary_loss=False,
-        ignore_mismatched_sizes=True,
     )
-    
-    # Create dataset exactly like test.py
-    test_dataset = BreastCancerDataset(
-        split='test',
-        splits_dir=splits_dir,
-        dataset_name=dataset_name,
+
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+
+    train_dataset = BreastCancerDataset(
+        split='train',
+        splits_dir=SPLITS_DIR,
+        dataset_name=DATASET_NAME,
         image_processor=image_processor,
-        model_type='yolos',
+        model_type=get_model_type(MODEL_NAME),
         dataset_epoch=epoch
     )
-    
-    # Limit samples if needed
-    if len(test_dataset) > num_samples:
-        indices = list(range(num_samples))
-        test_dataset = torch.utils.data.Subset(test_dataset, indices)
-    
-    print(f"Test loader: {len(test_dataset)} samples")
-    
-    # Setup evaluation exactly like test.py
-    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
-    
-    # Create trainer exactly like test.py
+    val_dataset = BreastCancerDataset(
+        split='val',
+        splits_dir=SPLITS_DIR,
+        dataset_name=DATASET_NAME,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
+
     trainer = Trainer(
         model=model,
-        args=TrainingArguments(
-            output_dir='./temp_output',
-            per_device_eval_batch_size=8,
-            dataloader_num_workers=2,
-            remove_unused_columns=False,
-            report_to=[],
-        ),
-        eval_dataset=test_dataset,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
         processing_class=image_processor,
         data_collator=collate_fn,
         compute_metrics=eval_compute_metrics_fn,
     )
+
+    test_dataset = BreastCancerDataset(
+        split='test',
+        splits_dir=SPLITS_DIR,
+        dataset_name=DATASET_NAME,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
     
-    # Evaluate exactly like test.py
+    # Limit to small sample size for testing
+    if len(test_dataset) > num_samples:
+        indices = list(range(num_samples))
+        test_dataset = torch.utils.data.Subset(test_dataset, indices)
+    
+    print(f'Test loader: {len(test_dataset)} samples')
+    
+    # Print individual sample details
+    print(f"\n=== Sample Details ===")
+    for i in range(min(3, len(test_dataset))):  # Show first 3 samples
+        sample = test_dataset[i]
+        labels = sample['labels']
+        print(f"Sample {i}:")
+        print(f"  Image shape: {sample['pixel_values'].shape}")
+        print(f"  Labels type: {type(labels)}")
+        if isinstance(labels, dict):
+            print(f"  Image ID: {labels.get('image_id', 'N/A')}")
+            print(f"  Boxes: {len(labels.get('boxes', []))} boxes")
+            print(f"  Classes: {labels.get('class_labels', [])}")
+        print()
+    
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-    
     print("\n=== Test Results ===")
     for key, value in test_results.items():
         if isinstance(value, float):
             print(f"{key}: {value:.4f}")
         else:
             print(f"{key}: {value}")
-    
-    return test_results
-
-def test_moe_model(moe_model_path, expert_dir, dataset_name, splits_dir, num_samples=16, epoch=None):
-    """Test MoE model - adapted from test.py structure"""
-    
-    # Load all expert models for MoE
-    expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
-    expert_paths = [os.path.join(expert_dir, name) for name in expert_names]
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Load expert models
-    models = []
-    image_processors = []
-    
-    for path in expert_paths:
-        if os.path.exists(path):
-            processor = AutoImageProcessor.from_pretrained(path)
-            model = get_yolos_model(path, processor, 'yolos').to(device)
-            models.append(model)
-            image_processors.append(processor)
-            print(f"Loaded expert: {os.path.basename(path)}")
-    
-    if not models:
-        print("No expert models found for MoE!")
-        return None
-    
-    # Create MoE model
-    integrated_moe = IntegratedMoE(models, n_models=len(models), top_k=2)
-    integrated_moe.load_state_dict(torch.load(moe_model_path, map_location=device))
-    integrated_moe.eval()
-    
-    # Wrap for compatibility
-    moe_detector = MoEObjectDetectionModel(integrated_moe)
-    
-    # Create dataset exactly like test.py
-    test_dataset = BreastCancerDataset(
-        split='test',
-        splits_dir=splits_dir,
-        dataset_name=dataset_name,
-        image_processor=image_processors[0],  # Use first processor
-        model_type='yolos',
-        dataset_epoch=epoch
-    )
-    
-    # Limit samples if needed
-    if len(test_dataset) > num_samples:
-        indices = list(range(num_samples))
-        test_dataset = torch.utils.data.Subset(test_dataset, indices)
-    
-    print(f"MoE Test loader: {len(test_dataset)} samples")
-    
-    # Setup evaluation exactly like test.py
-    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processors[0])
-    
-    # Create trainer exactly like test.py
-    trainer = Trainer(
-        model=moe_detector,
-        args=TrainingArguments(
-            output_dir='./temp_output',
-            per_device_eval_batch_size=8,
-            dataloader_num_workers=2,
-            remove_unused_columns=False,
-            report_to=[],
-        ),
-        eval_dataset=test_dataset,
-        processing_class=image_processors[0],
-        data_collator=collate_fn,
-        compute_metrics=eval_compute_metrics_fn,
-    )
-    
-    # Evaluate exactly like test.py
-    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
-    
-    print("\n=== MoE Test Results ===")
-    for key, value in test_results.items():
-        if isinstance(value, float):
-            print(f"{key}: {value:.4f}")
-        else:
-            print(f"{key}: {value}")
-    
-    return test_results
-
-def main():
-    parser = argparse.ArgumentParser(description="Test sample data with expert models and MoE")
-    parser.add_argument('--config', type=str, default='configs/train_config.yaml', 
-                       help='Path to config yaml')
-    parser.add_argument('--expert_dir', type=str, required=True,
-                       help='Path to directory containing expert model folders')
-    parser.add_argument('--moe_model', type=str, required=True,
-                       help='Path to trained MoE model file')
-    parser.add_argument('--dataset', type=str, default='CSAW',
-                       help='Dataset name to use')
-    parser.add_argument('--epoch', type=int, default=None,
-                       help='Dataset epoch value')
-    parser.add_argument('--num_samples', type=int, default=16,
-                       help='Number of test samples to use')
-    
-    args = parser.parse_args()
-    
-    # Load configuration
-    config = load_config(args.config)
-    splits_dir = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
-    
-    print(f"Testing dataset: {args.dataset}")
-    print(f"Splits directory: {splits_dir}")
-    print(f"Expert directory: {args.expert_dir}")
-    print(f"MoE model: {args.moe_model}")
-    
-    # Test dataset-specific expert
-    dataset_expert_name = f"yolos_{args.dataset}"
-    expert_path = os.path.join(args.expert_dir, dataset_expert_name)
-    
-    expert_result = None
-    if os.path.exists(expert_path):
-        print(f"\n=== Testing Expert: {dataset_expert_name} ===")
-        try:
-            expert_result = test_single_expert(
-                expert_path, 
-                args.dataset, 
-                splits_dir, 
-                args.num_samples, 
-                args.epoch
-            )
-        except Exception as e:
-            print(f"Expert test failed: {e}")
-            import traceback
-            traceback.print_exc()
-    else:
-        print(f"Expert model not found: {expert_path}")
-    
-    # Test MoE model
-    moe_result = None
-    if os.path.exists(args.moe_model):
-        print(f"\n=== Testing MoE Model ===")
-        try:
-            moe_result = test_moe_model(
-                args.moe_model,
-                args.expert_dir,
-                args.dataset,
-                splits_dir,
-                args.num_samples,
-                args.epoch
-            )
-        except Exception as e:
-            print(f"MoE test failed: {e}")
-            import traceback
-            traceback.print_exc()
-    else:
-        print(f"MoE model not found: {args.moe_model}")
-    
-    # Summary
-    print(f"\n=== Summary ===")
-    print(f"Dataset: {args.dataset}")
-    print(f"Test samples: {args.num_samples}")
-    
-    if expert_result:
-        expert_map = expert_result.get('test_map', 'N/A')
-        print(f"{dataset_expert_name} mAP: {expert_map}")
-    else:
-        print(f"{dataset_expert_name}: Failed/Not Found")
-    
-    if moe_result:
-        moe_map = moe_result.get('moe_map', 'N/A')
-        print(f"MoE mAP: {moe_map}")
-    else:
-        print("MoE: Failed/Not Found")
-    
-    # Limit the dataset to specified number of samples
-    if len(test_dataset) > args.num_samples:
-        indices = list(range(min(args.num_samples, len(test_dataset))))
-        test_dataset = torch.utils.data.Subset(test_dataset, indices)
-    
-    print(f"Test dataset size: {len(test_dataset)}")
-    
-    # Create DataLoader following test.py approach
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=4,  # Small batch size for testing
-        num_workers=0,  # Reduced workers for stability
-        pin_memory=True,
-        shuffle=False,
-        collate_fn=collate_fn
-    )
-    
-    print(f"Test loader: {len(test_dataset)} samples")
-    
-    # Test only the matching expert model (if found)
-    expert_results = []
-    expert_models = []
-    
-    if len(existing_paths) == 1 and existing_names[0] == dataset_expert_name:
-        # Test only the matching expert
-        expert_path = existing_paths[0]
-        expert_name = existing_names[0]
-        
-        print(f"\nTesting expert {expert_name} on {args.dataset} dataset...")
-        
-        # Load expert model
-        expert_model = get_yolos_model(expert_path, image_processors[0], 'yolos').to(device)
-        expert_models.append(expert_model)
-        
-        # Test the expert
-        result = test_individual_expert(
-            expert_path, 
-            test_loader, 
-            image_processors[0], 
-            device, 
-            expert_name
-        )
-        expert_results.append(result)
-        
-        # Load all experts for MoE comparison
-        print(f"\nLoading all experts for MoE model...")
-        for path, name in zip(all_expert_paths, expert_names):
-            if os.path.exists(path) and path != expert_path:  # Don't reload the same expert
-                additional_processor = AutoImageProcessor.from_pretrained(path)
-                additional_model = get_yolos_model(path, additional_processor, 'yolos').to(device)
-                expert_models.append(additional_model)
-                image_processors.append(additional_processor)
-                print(f"  Loaded additional expert: {name}")
-    else:
-        # Load all available experts
-        print(f"\nLoading all available experts...")
-        for i, (expert_path, expert_name) in enumerate(zip(existing_paths, existing_names)):
-            expert_model = get_yolos_model(expert_path, image_processors[i], 'yolos').to(device)
-            expert_models.append(expert_model)
-            print(f"  Loaded expert: {expert_name}")
-    
-    # Test MoE model if we have expert models loaded
-    if expert_models and os.path.exists(args.moe_model):
-        moe_result = test_moe_model(
-            args.moe_model,
-            expert_models,
-            test_loader,
-            image_processors,
-            device
-        )
-    else:
-        print("Cannot test MoE model - missing expert models or MoE model file")
-        moe_result = None
-    
-    # Summary
-    print(f"\n=== Summary ===")
-    print(f"Dataset: {args.dataset}")
-    print(f"Test samples: {len(test_dataset)}")
-    print(f"Device: {device}")
-    print(f"Experts loaded for MoE: {len(expert_models)}")
-    
-    # Show individual expert result (only the matching one)
-    if expert_results and len(expert_results) > 0:
-        result = expert_results[0]
-        name = existing_names[0] if existing_names else "Expert"
-        if result:
-            map_score = result.get('map', 'N/A')
-            print(f"{name} (dataset-specific) mAP: {map_score}")
-        else:
-            print(f"{name} (dataset-specific): Failed")
-    else:
-        print("No dataset-specific expert tested")
-    
-    if moe_result:
-        moe_map = moe_result.get('map', 'N/A')
-        print(f"MoE (all experts) mAP: {moe_map}")
-    else:
-        print("MoE: Failed/Skipped")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
+    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
+    args = parser.parse_args()
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples)
