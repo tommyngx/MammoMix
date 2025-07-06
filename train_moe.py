@@ -271,11 +271,11 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
     training_cfg = config.get('training', {})
     EPOCHS = epoch if epoch is not None else training_cfg.get('epochs', 50)
 
-    # Setup model paths
+    # Setup model paths - Add yolos_MOMO as 4th expert
     if weight_dir is not None:
         yolos_models = [
             os.path.join(weight_dir, sub) 
-            for sub in ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM']
+            for sub in ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
         ]
         image_processors = [AutoImageProcessor.from_pretrained(m) for m in yolos_models]
     else:
@@ -283,6 +283,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
             config.get('moe', {}).get('model1', 'hustvl/yolos-base'),
             config.get('moe', {}).get('model2', 'hustvl/yolos-small'),
             config.get('moe', {}).get('model3', 'hustvl/yolos-tiny'),
+            config.get('moe', {}).get('model4', 'hustvl/yolos-base'),  # Add 4th model
         ]
         image_processors = [get_image_processor(m, MAX_SIZE) for m in yolos_models]
     
