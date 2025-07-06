@@ -426,8 +426,6 @@ if __name__ == "__main__":
     parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
     args = parser.parse_args()
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
-    elif moe_model:
-        print(f"MoE model not found: {moe_model}")
     
     # Summary comparison
     print(f"\n=== Summary Comparison ===")
