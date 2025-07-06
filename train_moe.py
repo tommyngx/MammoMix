@@ -315,6 +315,19 @@ class MoEObjectDetectionModel(nn.Module):
                 self.logits = logits
                 self.loss = None  # Add loss attribute for compatibility
                 
+            def __getitem__(self, key):
+                """Make object subscriptable for Trainer compatibility"""
+                if key == 0:
+                    return self.loss
+                elif key == "loss":
+                    return self.loss
+                else:
+                    raise KeyError(f"Key {key} not found")
+                    
+            def keys(self):
+                """Return available keys"""
+                return ["loss", "logits"]
+                
         return ObjectDetectionOutput(combined_logits)
 
 def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None):
@@ -405,8 +418,18 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     return test_results
 
-def main(config_path, epoch=None, dataset=None, weight_dir=None):
+def main(config_path, epoch=None, dataset=None, weight_dir=None, weight_test=None):
     """Main training pipeline for MoE model."""
+    # If weight_test is provided, only run testing
+    if weight_test is not None:
+        print(f"Testing mode: Loading trained MoE model from {weight_test}")
+        config = load_config(config_path)
+        DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
+        
+        print("=== Testing trained MoE model with object detection metrics ===")
+        test_results = test_moe_model(config_path, weight_test, DATASET_NAME, weight_dir, epoch)
+        return None, test_results
+    
     # Load configuration
     config = load_config(config_path)
     DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
@@ -512,6 +535,8 @@ if __name__ == "__main__":
                        help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_dir', type=str, default=None, 
                        help='Path to directory containing yolos_CSAW, yolos_DMID, yolos_DDSM subfolders')
+    parser.add_argument('--weight_test', type=str, default=None, 
+                       help='Path to trained MoE model for testing only (skips training)')
     
     args = parser.parse_args()
-    main(args.config, args.epoch, args.dataset, args.weight_dir)
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.weight_test)
