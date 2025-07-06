@@ -380,35 +380,6 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         print(f"Expert pred_boxes shape: {expert_output.pred_boxes.shape}")
         print(f"Expert logits sample (first 3 queries):")
         print(expert_output.logits[0, :3, :])
-    
-    # Random sample comparison between Expert, MoE and Ground Truth
-    print(f"\n=== Random Sample Comparison ===")
-    import random
-    random_idx = random.randint(0, len(test_dataset) - 1)
-    random_sample = test_dataset[random_idx]
-    
-    print(f"Random sample index: {random_idx}")
-    print(f"Ground truth:")
-    gt_labels = random_sample['labels']
-    if isinstance(gt_labels, dict):
-        print(f"  Image ID: {gt_labels.get('image_id', 'N/A')}")
-        gt_boxes = gt_labels.get('boxes', [])
-        print(f"  GT Boxes: {gt_boxes}")
-        print(f"  GT Classes: {gt_labels.get('class_labels', [])}")
-    
-    # Get predictions from expert
-    pixel_values_single = random_sample['pixel_values'].unsqueeze(0).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-    
-    with torch.no_grad():
-        expert_pred = model(pixel_values_single)
-        print(f"\nExpert predictions:")
-        print(f"  Logits shape: {expert_pred.logits.shape}")
-        print(f"  Top 3 predictions (confidence scores):")
-        expert_probs = torch.softmax(expert_pred.logits[0], dim=-1)
-        top_expert = torch.topk(expert_probs[:, 1], 3)  # Get top 3 for class 1 (cancer)
-        for i, (score, idx) in enumerate(zip(top_expert.values, top_expert.indices)):
-            print(f"    Query {idx}: {score:.4f}")
-        print(f"  Pred boxes (top 3): {expert_pred.pred_boxes[0, top_expert.indices[:3], :]}")
         
     # Test MoE model if provided
     moe_results = None
@@ -416,43 +387,6 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         if weight_dir:
             expert_dir = os.path.dirname(weight_dir)  # Parent directory containing all experts
             try:
-                # First get MoE prediction for the same sample
-                print(f"\nMoE predictions for same sample:")
-                
-                # Load MoE components quickly for single prediction
-                expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
-                expert_paths = [os.path.join(expert_dir, name) for name in expert_names if os.path.exists(os.path.join(expert_dir, name))]
-                
-                if expert_paths:
-                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                    models = []
-                    for path in expert_paths[:2]:  # Just load 2 for quick test
-                        processor = AutoImageProcessor.from_pretrained(path)
-                        expert_model = get_yolos_model(path, processor, 'yolos').to(device)
-                        models.append(expert_model)
-                    
-                    if len(models) >= 2:
-                        integrated_moe = IntegratedMoE(models, n_models=len(models), top_k=2)
-                        integrated_moe.load_state_dict(torch.load(moe_model, map_location=device))
-                        integrated_moe.eval().to(device)
-                        moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
-                        
-                        with torch.no_grad():
-                            moe_pred = moe_detector(pixel_values_single)
-                            print(f"  Logits shape: {moe_pred.logits.shape}")
-                            print(f"  Top 3 predictions (confidence scores):")
-                            moe_probs = torch.softmax(moe_pred.logits[0], dim=-1)
-                            top_moe = torch.topk(moe_probs[:, 1], 3)  # Get top 3 for class 1 (cancer)
-                            for i, (score, idx) in enumerate(zip(top_moe.values, top_moe.indices)):
-                                print(f"    Query {idx}: {score:.4f}")
-                            print(f"  Pred boxes (top 3): {moe_pred.pred_boxes[0, top_moe.indices[:3], :]}")
-                        
-                        print(f"\nComparison:")
-                        print(f"  Expert top confidence: {top_expert.values[0]:.4f}")
-                        print(f"  MoE top confidence: {top_moe.values[0]:.4f}")
-                        print(f"  Difference: {(top_moe.values[0] - top_expert.values[0]):.4f}")
-                
-                # Now run full MoE evaluation
                 moe_results = test_moe_model(moe_model, expert_dir, test_dataset, image_processor)
             except Exception as e:
                 print(f"MoE testing failed: {e}")
