@@ -69,6 +69,7 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
             print(f"DEBUG: image_target content: {image_target}")
             print(f"DEBUG: Attempting to access image_target['boxes']...")
             boxes = torch.tensor(image_target['boxes'])
+            print(f"DEBUG: boxes: {boxes}")
             #boxes = convert_bbox_yolo_to_pascal(boxes, image_target['size'])
             boxes = convert_bbox_yolo_to_pascal(boxes, [MAX_SIZE, MAX_SIZE])
             labels = torch.tensor(image_target['class_labels'])
