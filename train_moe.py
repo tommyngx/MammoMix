@@ -566,13 +566,13 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
                         for i, img_id in enumerate(image_ids):
                             # Each image gets one box (since we have equal number of images and boxes)
                             individual_target = {
-                                'image_id': torch.tensor([img_id]),
-                                'boxes': torch.tensor([boxes[i]]).reshape(1, 4),
-                                'class_labels': torch.tensor([class_labels[i]]),
-                                'area': torch.tensor([areas[i]]),
-                                'iscrowd': torch.tensor([iscrowd[i]]),
-                                'size': torch.tensor(sizes[i]),
-                                'orig_size': torch.tensor(orig_sizes[i])
+                                'image_id': torch.tensor([int(img_id)]),
+                                'boxes': torch.tensor(np.array([boxes[i]], dtype=np.float32)).reshape(1, 4),
+                                'class_labels': torch.tensor([int(class_labels[i])]),
+                                'area': torch.tensor([float(areas[i])]),
+                                'iscrowd': torch.tensor([int(iscrowd[i])]),
+                                'size': torch.tensor(sizes[i].astype(np.int32)),
+                                'orig_size': torch.tensor(orig_sizes[i].astype(np.int32))
                             }
                             restructured_labels.append(individual_target)
                         
@@ -584,6 +584,10 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
                         
                         eval_pred = RestructuredEvalPred(eval_pred.predictions, restructured_labels)
                         print(f"DEBUG: Restructured to {len(restructured_labels)} individual targets")
+                        print(f"DEBUG: First restructured target type: {type(restructured_labels[0])}")
+                        print(f"DEBUG: First restructured target keys: {restructured_labels[0].keys()}")
+                        print(f"DEBUG: First restructured boxes type: {type(restructured_labels[0]['boxes'])}")
+                        print(f"DEBUG: First restructured boxes shape: {restructured_labels[0]['boxes'].shape}")
         
         # Call the original evaluation function
         return eval_compute_metrics_fn(eval_pred)
