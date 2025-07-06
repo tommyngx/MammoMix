@@ -447,75 +447,60 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     # Custom data collator that preserves label structure
     def moe_collate_fn(examples):
-        print(f"DEBUG: Input examples length: {len(examples)}")
-        if len(examples) > 0:
-            print(f"DEBUG: First example keys: {examples[0].keys() if hasattr(examples[0], 'keys') else 'No keys method'}")
-            if 'labels' in examples[0]:
-                print(f"DEBUG: First example labels type: {type(examples[0]['labels'])}")
-                print(f"DEBUG: First example labels content: {examples[0]['labels']}")
-        
         batch = collate_fn(examples)
-        print(f"DEBUG: Batch keys after collate_fn: {batch.keys()}")
         
         # Ensure labels are in the correct format for evaluation
         if 'labels' in batch:
-            print(f"DEBUG: Batch labels type: {type(batch['labels'])}")
-            print(f"DEBUG: Batch labels length: {len(batch['labels'])}")
-            if len(batch['labels']) > 0:
-                print(f"DEBUG: First batch label type: {type(batch['labels'][0])}")
-                print(f"DEBUG: First batch label content: {batch['labels'][0]}")
-            
             # Convert labels to the format expected by evaluation
             formatted_labels = []
             for i, labels_item in enumerate(batch['labels']):
-                print(f"DEBUG: Processing label {i}, type: {type(labels_item)}")
-                
                 # Handle BatchFeature objects from transformers
                 if hasattr(labels_item, 'data') and isinstance(labels_item.data, dict):
                     # Convert BatchFeature to regular dict
                     label_dict = dict(labels_item.data)
-                    print(f"DEBUG: Converted BatchFeature to dict: {label_dict}")
                     formatted_labels.append(label_dict)
                 elif isinstance(labels_item, dict):
                     # Already a regular dict
-                    print(f"DEBUG: Label is already dict: {labels_item}")
                     formatted_labels.append(labels_item)
                 elif hasattr(labels_item, '__dict__'):
                     # Try to convert object with attributes to dict
                     try:
                         label_dict = {
-                            'boxes': labels_item.get('boxes', torch.tensor([]).reshape(0, 4)),
-                            'class_labels': labels_item.get('class_labels', torch.tensor([])),
-                            'image_id': labels_item.get('image_id', torch.tensor([i]))
+                            'boxes': getattr(labels_item, 'boxes', torch.tensor([]).reshape(0, 4)),
+                            'class_labels': getattr(labels_item, 'class_labels', torch.tensor([])),
+                            'image_id': getattr(labels_item, 'image_id', torch.tensor([i])),
+                            'size': getattr(labels_item, 'size', torch.tensor([640, 640])),
+                            'area': getattr(labels_item, 'area', torch.tensor([])),
+                            'iscrowd': getattr(labels_item, 'iscrowd', torch.tensor([])),
+                            'orig_size': getattr(labels_item, 'orig_size', torch.tensor([640, 640]))
                         }
-                        print(f"DEBUG: Converted object to dict: {label_dict}")
                         formatted_labels.append(label_dict)
                     except Exception as e:
-                        print(f"DEBUG: Failed to convert object, creating empty: {e}")
                         # Create empty label dict for consistency
                         empty_label = {
                             'boxes': torch.tensor([]).reshape(0, 4),
                             'class_labels': torch.tensor([]),
-                            'image_id': torch.tensor([i])
+                            'image_id': torch.tensor([i]),
+                            'size': torch.tensor([640, 640]),
+                            'area': torch.tensor([]),
+                            'iscrowd': torch.tensor([]),
+                            'orig_size': torch.tensor([640, 640])
                         }
                         formatted_labels.append(empty_label)
                 else:
                     # Create empty label dict for consistency
-                    print(f"DEBUG: Creating empty label dict for unknown type: {type(labels_item)}")
                     empty_label = {
                         'boxes': torch.tensor([]).reshape(0, 4),
                         'class_labels': torch.tensor([]),
-                        'image_id': torch.tensor([i])
+                        'image_id': torch.tensor([i]),
+                        'size': torch.tensor([640, 640]),
+                        'area': torch.tensor([]),
+                        'iscrowd': torch.tensor([]),
+                        'orig_size': torch.tensor([640, 640])
                     }
                     formatted_labels.append(empty_label)
             
             batch['labels'] = formatted_labels
-            print(f"DEBUG: Final formatted labels length: {len(formatted_labels)}")
-            if len(formatted_labels) > 0:
-                print(f"DEBUG: Final first label type: {type(formatted_labels[0])}")
-                print(f"DEBUG: Final first label keys: {formatted_labels[0].keys() if isinstance(formatted_labels[0], dict) else 'Not a dict'}")
-                if isinstance(formatted_labels[0], dict) and 'boxes' in formatted_labels[0]:
-                    print(f"DEBUG: First label boxes: {formatted_labels[0]['boxes']}")
         
         return batch
     
@@ -530,12 +515,11 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     print(f'Test loader: {len(test_dataset)} samples')
     
-    # Add debug for the dataset itself
-    print("DEBUG: Checking test dataset sample...")
-    sample = test_dataset[0]
-    print(f"DEBUG: Sample keys: {sample.keys()}")
-    print(f"DEBUG: Sample labels type: {type(sample['labels'])}")
-    print(f"DEBUG: Sample labels content: {sample['labels']}")
+    # Test a single batch to verify label structure
+    test_batch = moe_collate_fn([test_dataset[0], test_dataset[1]])
+    print(f"Test batch label structure: {type(test_batch['labels'][0])}")
+    print(f"Test batch label keys: {test_batch['labels'][0].keys()}")
+    print(f"Test batch boxes type: {type(test_batch['labels'][0]['boxes'])}")
     
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     
