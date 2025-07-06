@@ -62,8 +62,9 @@ class GatingNetwork(nn.Module):
     Gating network that learns to select the best expert for each input.
     Takes model predictions as input and outputs expert weights.
     """
-    def __init__(self, n_models=3, hidden_dim=16):
+    def __init__(self, n_models=4, hidden_dim=16, top_k=2):
         super().__init__()
+        self.top_k = top_k
         self.gate = nn.Sequential(
             nn.Linear(n_models, hidden_dim),
             nn.ReLU(),
@@ -72,18 +73,32 @@ class GatingNetwork(nn.Module):
         )
 
     def forward(self, expert_probs):
-        """Forward pass through gating network."""
-        return self.gate(expert_probs)
+        """Forward pass through gating network with top-k selection."""
+        weights = self.gate(expert_probs)
+        
+        # Apply top-k selection: zero out all but top-k weights
+        _, top_indices = torch.topk(weights, self.top_k, dim=-1)
+        
+        # Create mask for top-k selection
+        mask = torch.zeros_like(weights)
+        mask.scatter_(-1, top_indices, 1.0)
+        
+        # Apply mask and renormalize
+        masked_weights = weights * mask
+        normalized_weights = masked_weights / (masked_weights.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        return normalized_weights, top_indices
 
 class IntegratedMoE(nn.Module):
     """
     Integrated MoE model that contains all expert models and gating network.
     During training, only the gating network is trained while experts are frozen.
     """
-    def __init__(self, expert_models, n_models=3, hidden_dim=16):
+    def __init__(self, expert_models, n_models=4, hidden_dim=16, top_k=2):
         super().__init__()
         self.experts = nn.ModuleList(expert_models)
-        self.gate = GatingNetwork(n_models, hidden_dim)
+        self.gate = GatingNetwork(n_models, hidden_dim, top_k)
+        self.top_k = top_k
         
         # Freeze expert models
         for expert in self.experts:
@@ -91,28 +106,90 @@ class IntegratedMoE(nn.Module):
                 param.requires_grad = False
     
     def forward(self, pixel_values):
-        """Forward pass through integrated MoE."""
-        # Get predictions from all experts
+        """Forward pass through integrated MoE with proper output structure preservation."""
+        # Get full outputs from all experts (not just probabilities)
+        expert_outputs = []
         expert_probs = []
+        
         for expert in self.experts:
             with torch.no_grad():
                 outputs = expert(pixel_values)
-                # Fix: Get proper probability shape (batch_size,)
+                expert_outputs.append(outputs)
+                # Extract probabilities for gating
                 logits = outputs.logits  # Shape: (batch_size, num_queries, num_classes)
-                # Take mean across queries, then sigmoid for binary classification
                 probs = torch.sigmoid(logits[..., 0].mean(dim=1))  # Shape: (batch_size,)
                 expert_probs.append(probs)
         
         # Stack expert predictions: (batch_size, n_models)
         expert_probs = torch.stack(expert_probs, dim=1)
         
-        # Get gating weights
-        weights = self.gate(expert_probs)
+        # Get gating weights and top-k indices
+        weights, top_indices = self.gate(expert_probs)
         
-        # Compute weighted prediction
+        # Combine outputs from selected experts
+        batch_size = pixel_values.shape[0]
+        combined_outputs = self._combine_expert_outputs(expert_outputs, weights, top_indices, batch_size)
+        
+        # Compute final prediction probability for training
         final_pred = torch.sum(weights * expert_probs, dim=1)
         
-        return final_pred, weights, expert_probs
+        return combined_outputs, final_pred, weights, expert_probs, top_indices
+    
+    def _combine_expert_outputs(self, expert_outputs, weights, top_indices, batch_size):
+        """Combine outputs from top-k selected experts maintaining object detection structure."""
+        # Initialize combined output structure based on first expert
+        reference_output = expert_outputs[0]
+        
+        # Get dimensions
+        num_queries = reference_output.logits.shape[1]
+        num_classes = reference_output.logits.shape[2]
+        
+        # Initialize combined logits and boxes
+        combined_logits = torch.zeros(batch_size, num_queries, num_classes, 
+                                    device=reference_output.logits.device)
+        
+        # For each sample in batch, combine outputs from its top-k experts
+        for batch_idx in range(batch_size):
+            sample_combined_logits = torch.zeros(num_queries, num_classes, 
+                                               device=reference_output.logits.device)
+            
+            # Get top-k experts for this sample
+            for k_idx in range(self.top_k):
+                expert_idx = top_indices[batch_idx, k_idx].item()
+                expert_weight = weights[batch_idx, expert_idx].item()
+                
+                # Weight and add expert's contribution
+                expert_logits = expert_outputs[expert_idx].logits[batch_idx]
+                sample_combined_logits += expert_weight * expert_logits
+            
+            combined_logits[batch_idx] = sample_combined_logits
+        
+        # Create output object compatible with transformers
+        class ObjectDetectionOutput:
+            def __init__(self, logits, pred_boxes=None):
+                self.logits = logits
+                self.pred_boxes = pred_boxes if pred_boxes is not None else reference_output.pred_boxes
+                self.loss = torch.tensor(0.0, device=logits.device, requires_grad=False)
+                
+            def __getitem__(self, key):
+                """Make object subscriptable for Trainer compatibility"""
+                if key == 0:
+                    return self.loss
+                elif key == "loss":
+                    return self.loss
+                elif isinstance(key, slice):
+                    if key == slice(1, None, None):  # outputs[1:]
+                        return (self.logits,)
+                    else:
+                        return ()
+                else:
+                    raise KeyError(f"Key {key} not found")
+                    
+            def keys(self):
+                """Return available keys"""
+                return ["loss", "logits", "pred_boxes"]
+                
+        return ObjectDetectionOutput(combined_logits)
 
 # ================================
 # TRAINING UTILITIES
@@ -154,7 +231,7 @@ class MoETrainer:
                 pixel_values = batch['pixel_values'].to(self.device)
                 targets = self._extract_targets(batch)
                 
-                final_pred, weights, expert_probs = self.model(pixel_values)
+                combined_outputs, final_pred, weights, expert_probs, top_indices = self.model(pixel_values)
                 loss = criterion(final_pred, targets)
                 
                 loss.backward()
@@ -191,7 +268,7 @@ class MoETrainer:
                 pixel_values = batch['pixel_values'].to(self.device)
                 targets = self._extract_targets(batch)
                 
-                final_pred, _, _ = self.model(pixel_values)
+                combined_outputs, final_pred, weights, expert_probs, top_indices = self.model(pixel_values)
                 predicted = (final_pred > 0.5).float()
                 
                 total += targets.size(0)
@@ -275,67 +352,11 @@ class MoEObjectDetectionModel(nn.Module):
         
     def forward(self, pixel_values, labels=None, **kwargs):
         """Return object detection outputs compatible with test.py evaluation"""
-        # Get MoE prediction
-        final_pred, weights, expert_probs = self.moe(pixel_values)
+        # Get MoE combined output - this now returns properly structured output
+        combined_outputs, final_pred, weights, expert_probs, top_indices = self.moe(pixel_values)
         
-        # Create mock object detection output structure
-        # Use the best expert's output as base and modify with MoE prediction
-        best_expert_idx = weights.argmax(dim=1)
-        
-        # Get outputs from all experts to find the best one per sample
-        expert_outputs = []
-        for expert in self.moe.experts:
-            with torch.no_grad():
-                outputs = expert(pixel_values)
-                expert_outputs.append(outputs)
-        
-        # Create combined output using MoE weights
-        batch_size = pixel_values.shape[0]
-        combined_logits = []
-        
-        for i in range(batch_size):
-            # Take the output from the highest weighted expert for this sample
-            best_idx = best_expert_idx[i].item()
-            expert_output = expert_outputs[best_idx]
-            
-            # Modify the logits with MoE final prediction
-            modified_logits = expert_output.logits[i:i+1].clone()
-            # Scale the cancer class logits by MoE confidence
-            moe_confidence = final_pred[i].item()
-            modified_logits[..., 0] = modified_logits[..., 0] * moe_confidence
-            
-            combined_logits.append(modified_logits)
-        
-        # Stack all logits
-        combined_logits = torch.cat(combined_logits, dim=0)
-        
-        # Create output object compatible with transformers
-        class ObjectDetectionOutput:
-            def __init__(self, logits):
-                self.logits = logits
-                # Create a dummy loss tensor to avoid NoneType error
-                self.loss = torch.tensor(0.0, device=logits.device, requires_grad=False)
-                
-            def __getitem__(self, key):
-                """Make object subscriptable for Trainer compatibility"""
-                if key == 0:
-                    return self.loss
-                elif key == "loss":
-                    return self.loss
-                elif isinstance(key, slice):
-                    # Handle slice operations like outputs[1:]
-                    if key == slice(1, None, None):  # outputs[1:]
-                        return (self.logits,)
-                    else:
-                        return ()
-                else:
-                    raise KeyError(f"Key {key} not found")
-                    
-            def keys(self):
-                """Return available keys"""
-                return ["loss", "logits"]
-                
-        return ObjectDetectionOutput(combined_logits)
+        # Return the combined outputs directly - they maintain the same structure as individual experts
+        return combined_outputs
 
 def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None):
     """Test the trained MoE model using evaluation metrics like test.py"""
@@ -515,9 +536,9 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, weight_test=Non
     for i, model in enumerate(models):
         models[i] = model.to(device)
     
-    # Create and train integrated MoE
+    # Create and train integrated MoE with top-k=2
     print("Creating integrated MoE model...")
-    integrated_moe = IntegratedMoE(models, n_models=len(models))
+    integrated_moe = IntegratedMoE(models, n_models=len(models), top_k=2)
     moe_trainer = MoETrainer(integrated_moe, device, output_dir)
     
     print("Training integrated MoE (gating network only)...")
