@@ -213,6 +213,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         remove_unused_columns=False,
         report_to=[],
         fp16=torch.cuda.is_available(),
+        eval_do_concat_batches=False,  # Add this to prevent batch concatenation issues
     )
     
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
@@ -227,13 +228,19 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
     
     # Evaluate expert
     print(f"\n=== Testing Expert ({DATASET_NAME}) ===")
-    expert_results = expert_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='expert')
-    print(f"\n=== Expert ({DATASET_NAME}) Test Results ===")
-    for key, value in expert_results.items():
-        if isinstance(value, float):
-            print(f"{key}: {value:.4f}")
-        else:
-            print(f"{key}: {value}")
+    try:
+        expert_results = expert_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='expert')
+        print(f"\n=== Expert ({DATASET_NAME}) Test Results ===")
+        for key, value in expert_results.items():
+            if isinstance(value, float):
+                print(f"{key}: {value:.4f}")
+            else:
+                print(f"{key}: {value}")
+    except Exception as e:
+        print(f"Expert evaluation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        expert_results = None
     
     # Test MoE model if provided
     moe_results = None
@@ -260,23 +267,39 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                     integrated_moe.eval().to(device)
                     moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
                     
-                    # Create MoE trainer
+                    # Create MoE trainer with same settings
+                    moe_training_args = TrainingArguments(
+                        output_dir='./temp_output',
+                        per_device_eval_batch_size=per_device_eval_batch_size,
+                        dataloader_num_workers=0,
+                        remove_unused_columns=False,
+                        report_to=[],
+                        fp16=torch.cuda.is_available(),
+                        eval_do_concat_batches=False,  # Add this to prevent batch concatenation issues
+                    )
+                    
                     moe_trainer = Trainer(
                         model=moe_detector,
-                        args=training_args,
+                        args=moe_training_args,
                         processing_class=image_processor,
                         data_collator=collate_fn,
                         compute_metrics=eval_compute_metrics_fn,
                     )
                     
                     # Evaluate MoE
-                    moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
-                    print(f"\n=== MoE Test Results ===")
-                    for key, value in moe_results.items():
-                        if isinstance(value, float):
-                            print(f"{key}: {value:.4f}")
-                        else:
-                            print(f"{key}: {value}")
+                    try:
+                        moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+                        print(f"\n=== MoE Test Results ===")
+                        for key, value in moe_results.items():
+                            if isinstance(value, float):
+                                print(f"{key}: {value:.4f}")
+                            else:
+                                print(f"{key}: {value}")
+                    except Exception as e:
+                        print(f"MoE evaluation failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        moe_results = None
                     
                 else:
                     print("Error: Need at least 2 expert models for MoE")
@@ -303,6 +326,8 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         expert_map_50 = expert_results.get('expert_map_50', 'N/A')
         print(f"Expert ({DATASET_NAME}) mAP: {expert_map}")
         print(f"Expert ({DATASET_NAME}) mAP@50: {expert_map_50}")
+    else:
+        print(f"Expert ({DATASET_NAME}): Evaluation failed")
     
     if moe_results:
         moe_map = moe_results.get('moe_map', 'N/A')
@@ -311,12 +336,12 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         print(f"MoE (all experts) mAP@50: {moe_map_50}")
         
         # Calculate improvement
-        if isinstance(expert_map, float) and isinstance(moe_map, float):
+        if expert_results and isinstance(expert_map, float) and isinstance(moe_map, float):
             improvement = moe_map - expert_map
             improvement_pct = (improvement / expert_map) * 100 if expert_map != 0 else 0
             print(f"mAP Improvement: {improvement:.4f} ({improvement_pct:+.2f}%)")
         
-        if isinstance(expert_map_50, float) and isinstance(moe_map_50, float):
+        if expert_results and isinstance(expert_map_50, float) and isinstance(moe_map_50, float):
             improvement_50 = moe_map_50 - expert_map_50
             improvement_50_pct = (improvement_50 / expert_map_50) * 100 if expert_map_50 != 0 else 0
             print(f"mAP@50 Improvement: {improvement_50:.4f} ({improvement_50_pct:+.2f}%)")
