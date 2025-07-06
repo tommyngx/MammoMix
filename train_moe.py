@@ -447,26 +447,54 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     # Custom data collator that preserves label structure
     def moe_collate_fn(examples):
+        print(f"DEBUG: Input examples length: {len(examples)}")
+        if len(examples) > 0:
+            print(f"DEBUG: First example keys: {examples[0].keys() if hasattr(examples[0], 'keys') else 'No keys method'}")
+            if 'labels' in examples[0]:
+                print(f"DEBUG: First example labels type: {type(examples[0]['labels'])}")
+                print(f"DEBUG: First example labels content: {examples[0]['labels']}")
+        
         batch = collate_fn(examples)
+        print(f"DEBUG: Batch keys after collate_fn: {batch.keys()}")
+        
         # Ensure labels are in the correct format for evaluation
         if 'labels' in batch:
+            print(f"DEBUG: Batch labels type: {type(batch['labels'])}")
+            print(f"DEBUG: Batch labels length: {len(batch['labels'])}")
+            if len(batch['labels']) > 0:
+                print(f"DEBUG: First batch label type: {type(batch['labels'][0])}")
+                print(f"DEBUG: First batch label content: {batch['labels'][0]}")
+            
             # Convert labels to the format expected by evaluation
             formatted_labels = []
-            for labels_list in batch['labels']:
+            for i, labels_list in enumerate(batch['labels']):
+                print(f"DEBUG: Processing label {i}, type: {type(labels_list)}, content: {labels_list}")
+                
                 if isinstance(labels_list, list) and len(labels_list) > 0:
                     # Take the first label dict if it's a list
-                    formatted_labels.append(labels_list[0])
+                    first_label = labels_list[0]
+                    print(f"DEBUG: First label in list type: {type(first_label)}, content: {first_label}")
+                    formatted_labels.append(first_label)
                 elif isinstance(labels_list, dict):
                     # Already in correct format
+                    print(f"DEBUG: Label is dict: {labels_list}")
                     formatted_labels.append(labels_list)
                 else:
                     # Create empty label dict for consistency
-                    formatted_labels.append({
+                    print(f"DEBUG: Creating empty label dict for type: {type(labels_list)}")
+                    empty_label = {
                         'boxes': torch.tensor([]).reshape(0, 4),
                         'class_labels': torch.tensor([]),
-                        'image_id': torch.tensor(0)
-                    })
+                        'image_id': torch.tensor(i)  # Use index as image_id
+                    }
+                    formatted_labels.append(empty_label)
+            
             batch['labels'] = formatted_labels
+            print(f"DEBUG: Final formatted labels length: {len(formatted_labels)}")
+            if len(formatted_labels) > 0:
+                print(f"DEBUG: Final first label type: {type(formatted_labels[0])}")
+                print(f"DEBUG: Final first label keys: {formatted_labels[0].keys() if isinstance(formatted_labels[0], dict) else 'Not a dict'}")
+        
         return batch
     
     trainer = Trainer(
@@ -479,6 +507,14 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     )
     
     print(f'Test loader: {len(test_dataset)} samples')
+    
+    # Add debug for the dataset itself
+    print("DEBUG: Checking test dataset sample...")
+    sample = test_dataset[0]
+    print(f"DEBUG: Sample keys: {sample.keys()}")
+    print(f"DEBUG: Sample labels type: {type(sample['labels'])}")
+    print(f"DEBUG: Sample labels content: {sample['labels']}")
+    
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     
     print("\n=== MoE Test Results ===")
