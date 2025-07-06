@@ -273,7 +273,7 @@ class MoEObjectDetectionModel(nn.Module):
         super().__init__()
         self.moe = integrated_moe
         
-    def forward(self, pixel_values):
+    def forward(self, pixel_values, labels=None, **kwargs):
         """Return object detection outputs compatible with test.py evaluation"""
         # Get MoE prediction
         final_pred, weights, expert_probs = self.moe(pixel_values)
@@ -310,10 +310,10 @@ class MoEObjectDetectionModel(nn.Module):
         combined_logits = torch.cat(combined_logits, dim=0)
         
         # Create output object compatible with transformers
-        from transformers.modeling_outputs import BaseModelOutput
         class ObjectDetectionOutput:
             def __init__(self, logits):
                 self.logits = logits
+                self.loss = None  # Add loss attribute for compatibility
                 
         return ObjectDetectionOutput(combined_logits)
 
