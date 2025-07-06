@@ -4,13 +4,35 @@ import pickle
 import datetime
 from pathlib import Path
 
-# Suppress TensorFlow and CUDA warnings
+# Suppress TensorFlow and CUDA warnings - Enhanced
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
 os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
+os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ['ABSL_LOG_LEVEL'] = '3'
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GLOG_minloglevel"] = "2"
+
+# Redirect stderr to suppress cuDNN/cuBLAS warnings
+import sys
+import warnings
+
+class DevNull:
+    def write(self, msg):
+        # Only suppress lines containing specific CUDA warnings
+        if any(x in msg for x in ["Unable to register cuDNN", "Unable to register cuBLAS", "All log messages before absl"]):
+            return
+        sys.__stderr__.write(msg)
+    def flush(self):
+        sys.__stderr__.flush()
+
+# Apply stderr filter
+sys.stderr = DevNull()
+warnings.filterwarnings("ignore")
 
 import numpy as np
 import yaml
