@@ -175,10 +175,33 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
         
         # Format predictions exactly like the trainer does
         predictions_formatted = []
+        all_pred_boxes = []
+        
+        # Collect pred_boxes as well
+        eval_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
+        
+        for batch_idx, batch in enumerate(eval_loader):
+            pixel_values_batch = batch['pixel_values'].to(device)
+            labels_batch = batch['labels']
+            
+            with torch.no_grad():
+                outputs = moe_detector(pixel_values_batch)
+                all_predictions.append(outputs.logits.cpu())
+                all_pred_boxes.append(outputs.pred_boxes.cpu())  # Collect real pred_boxes
+                all_targets.extend(labels_batch)
+        
+        print(f"DEBUG: Total predictions collected: {len(all_predictions)}")
+        print(f"DEBUG: Total pred_boxes collected: {len(all_pred_boxes)}")
+        print(f"DEBUG: Total targets collected: {len(all_targets)}")
+        
+        # Format predictions with REAL pred_boxes
         for i in range(len(all_predictions)):
             batch_logits = all_predictions[i].numpy()
-            batch_pred_boxes = torch.zeros(batch_logits.shape[0], batch_logits.shape[1], 4).numpy()
+            batch_pred_boxes = all_pred_boxes[i].numpy()  # Use real pred_boxes instead of zeros
             predictions_formatted.append((None, batch_logits, batch_pred_boxes))
+            
+        print(f"DEBUG: Using REAL pred_boxes instead of dummy zeros")
+        print(f"DEBUG: First pred_boxes sample: {all_pred_boxes[0][0, :3, :]}")
         
         # Format targets as list of batches
         targets_formatted = []
