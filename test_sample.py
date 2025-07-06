@@ -168,7 +168,7 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
                 all_predictions.append(outputs.logits.cpu())
                 all_targets.extend(labels_batch)
                 
-            print(f"DEBUG: Batch {batch_idx}, predictions shape: {outputs.logits.shape}, targets: {len(labels_batch)}")
+            #print(f"DEBUG: Batch {batch_idx}, predictions shape: {outputs.logits.shape}, targets: {len(labels_batch)}")
         
         print(f"DEBUG: Total predictions collected: {len(all_predictions)}")
         print(f"DEBUG: Total targets collected: {len(all_targets)}")
