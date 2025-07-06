@@ -176,19 +176,47 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
                 print(f"DEBUG: Expert logits shape: {expert_output.logits.shape}")
                 print(f"DEBUG: Expert logits sample: {expert_output.logits[0, :3, :]}")  # First 3 queries
         
-        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+        # Skip trainer evaluation and use manual evaluation
+        print(f"\nDEBUG: Attempting manual evaluation...")
         
-        print("\n=== MoE Test Results ===")
-        for key, value in test_results.items():
+        # Collect all predictions manually
+        all_predictions = []
+        all_targets = []
+        
+        eval_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
+        
+        for batch_idx, batch in enumerate(eval_loader):
+            pixel_values_batch = batch['pixel_values'].to(device)
+            labels_batch = batch['labels']
+            
+            with torch.no_grad():
+                outputs = moe_detector(pixel_values_batch)
+                all_predictions.append(outputs.logits.cpu())
+                all_targets.extend(labels_batch)
+        
+        # Create evaluation prediction object
+        predictions_tensor = torch.cat(all_predictions, dim=0)
+        
+        # Try to create proper evaluation structure
+        from types import SimpleNamespace
+        eval_pred = SimpleNamespace()
+        eval_pred.predictions = (None, predictions_tensor.numpy(), None)  # Match expected format
+        eval_pred.label_ids = all_targets
+        
+        # Call evaluation function directly
+        metrics = eval_compute_metrics_fn(eval_pred)
+        
+        print("\n=== MoE Test Results (Manual) ===")
+        for key, value in metrics.items():
             if isinstance(value, float):
-                print(f"{key}: {value:.4f}")
+                print(f"moe_{key}: {value:.4f}")
             else:
-                print(f"{key}: {value}")
+                print(f"moe_{key}: {value}")
         
-        return test_results
+        return {f"moe_{k}": v for k, v in metrics.items()}
     
     except Exception as e:
-        print(f"DEBUG: Trainer evaluation failed: {e}")
+        print(f"DEBUG: Manual evaluation failed: {e}")
         import traceback
         traceback.print_exc()
         return None
