@@ -57,6 +57,7 @@ from transformers import (
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn
+from train_moe import IntegratedMoE, MoEObjectDetectionModel, get_yolos_model
 
 # Suppress TensorFlow and CUDA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Tắt log của TensorFlow (0=verbose, 1=info, 2=warning, 3=error)
@@ -73,7 +74,72 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8):
+def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
+    """Test MoE model and print sample outputs"""
+    
+    # Load all expert models for MoE
+    expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
+    expert_paths = [os.path.join(expert_dir, name) for name in expert_names]
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Load expert models
+    models = []
+    image_processors = []
+    
+    for path in expert_paths:
+        if os.path.exists(path):
+            processor = AutoImageProcessor.from_pretrained(path)
+            model = get_yolos_model(path, processor, 'yolos').to(device)
+            models.append(model)
+            image_processors.append(processor)
+            print(f"Loaded expert: {os.path.basename(path)}")
+    
+    if not models:
+        print("No expert models found for MoE!")
+        return None
+    
+    # Create MoE model
+    integrated_moe = IntegratedMoE(models, n_models=len(models), top_k=2)
+    integrated_moe.load_state_dict(torch.load(moe_model_path, map_location=device))
+    integrated_moe.eval()
+    
+    # Wrap for compatibility
+    moe_detector = MoEObjectDetectionModel(integrated_moe)
+    
+    # Setup evaluation
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    # Create trainer
+    training_args = TrainingArguments(
+        output_dir='./temp_output',
+        per_device_eval_batch_size=4,
+        dataloader_num_workers=0,
+        remove_unused_columns=False,
+        report_to=[],
+    )
+    
+    trainer = Trainer(
+        model=moe_detector,
+        args=training_args,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    print(f"\n=== Testing MoE Model ===")
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+    
+    print("\n=== MoE Test Results ===")
+    for key, value in test_results.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+    
+    return test_results
+
+def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, moe_model=None):
     config = load_config(config_path)
     DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
@@ -229,13 +295,36 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8):
             import traceback
             traceback.print_exc()
     
+    # Test individual expert model
+    print(f"\n=== Testing Individual Expert Model ===")
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-    print("\n=== Test Results ===")
+    print("\n=== Expert Test Results ===")
     for key, value in test_results.items():
         if isinstance(value, float):
             print(f"{key}: {value:.4f}")
         else:
             print(f"{key}: {value}")
+    
+    # Test MoE model if provided
+    moe_results = None
+    if moe_model and os.path.exists(moe_model):
+        if weight_dir:
+            expert_dir = os.path.dirname(weight_dir)  # Parent directory containing all experts
+            moe_results = test_moe_model(moe_model, expert_dir, test_dataset, image_processor)
+        else:
+            print("Warning: weight_dir required for MoE testing (to find expert models)")
+    elif moe_model:
+        print(f"MoE model not found: {moe_model}")
+    
+    # Summary comparison
+    print(f"\n=== Summary Comparison ===")
+    if test_results:
+        expert_map = test_results.get('test_map', 'N/A')
+        print(f"Expert ({DATASET_NAME}) mAP: {expert_map}")
+    
+    if moe_results:
+        moe_map = moe_results.get('moe_map', 'N/A')
+        print(f"MoE (all experts) mAP: {moe_map}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -244,5 +333,6 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
     parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
+    parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
     args = parser.parse_args()
-    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples)
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
