@@ -194,14 +194,28 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
                 all_predictions.append(outputs.logits.cpu())
                 all_targets.extend(labels_batch)
         
-        # Create evaluation prediction object
+        # Create evaluation prediction object exactly like expert evaluation does
         predictions_tensor = torch.cat(all_predictions, dim=0)
         
-        # Try to create proper evaluation structure
+        # Format predictions exactly like the trainer does
+        predictions_formatted = []
+        batch_size = 2
+        for i in range(0, len(all_predictions)):
+            batch_logits = all_predictions[i].numpy()
+            batch_pred_boxes = torch.zeros(batch_logits.shape[0], batch_logits.shape[1], 4).numpy()  # Dummy boxes
+            predictions_formatted.append((None, batch_logits, batch_pred_boxes))
+        
+        # Format targets as list of batches
+        targets_formatted = []
+        for i in range(0, len(all_targets), batch_size):
+            batch_targets = all_targets[i:i+batch_size]
+            targets_formatted.append(batch_targets)
+        
+        # Create evaluation object
         from types import SimpleNamespace
         eval_pred = SimpleNamespace()
-        eval_pred.predictions = (None, predictions_tensor.numpy(), None)  # Match expected format
-        eval_pred.label_ids = all_targets
+        eval_pred.predictions = predictions_formatted
+        eval_pred.label_ids = targets_formatted
         
         # Call evaluation function directly
         metrics = eval_compute_metrics_fn(eval_pred)
@@ -412,20 +426,6 @@ if __name__ == "__main__":
     parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
     args = parser.parse_args()
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
-    
-    # Test MoE model if provided
-    moe_results = None
-    if moe_model and os.path.exists(moe_model):
-        if weight_dir:
-            expert_dir = os.path.dirname(weight_dir)  # Parent directory containing all experts
-            try:
-                moe_results = test_moe_model(moe_model, expert_dir, test_dataset, image_processor)
-            except Exception as e:
-                print(f"MoE testing failed: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print("Warning: weight_dir required for MoE testing (to find expert models)")
     elif moe_model:
         print(f"MoE model not found: {moe_model}")
     
