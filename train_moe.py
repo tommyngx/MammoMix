@@ -443,8 +443,14 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     # Custom data collator that preserves label structure
     def moe_collate_fn(examples):
-        # Just use the original collate_fn, which returns the correct structure
-        return collate_fn(examples)
+        batch = collate_fn(examples)
+        # Fix: If batch['labels'] is a single BatchFeature, wrap it in a list
+        if 'labels' in batch and not isinstance(batch['labels'], list):
+            batch['labels'] = [batch['labels']]
+        # If batch['labels'] is a list but its first element is not a list/dict, wrap it
+        elif 'labels' in batch and len(batch['labels']) > 0 and not isinstance(batch['labels'][0], (dict, list)):
+            batch['labels'] = [batch['labels']]
+        return batch
 
     # DEBUG: Compare individual expert model vs MoE model with Trainer
     print("\n=== DEBUG: Testing individual expert first ===")
