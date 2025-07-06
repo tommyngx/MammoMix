@@ -447,23 +447,42 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
         # The issue is likely that we're over-processing the labels
         return collate_fn(examples)
     
-    # Remove the debug wrapper and use the original evaluation function directly
+    # DEBUG: Compare individual expert model vs MoE model with Trainer
+    print("\n=== DEBUG: Testing individual expert first ===")
+    expert_trainer = Trainer(
+        model=models[0],  # Use first expert model
+        args=TrainingArguments(
+            output_dir=output_dir,
+            per_device_eval_batch_size=8,
+            dataloader_num_workers=2,
+            remove_unused_columns=False,
+            report_to=[],
+        ),
+        eval_dataset=test_dataset,
+        processing_class=image_processors[0],
+        data_collator=moe_collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    try:
+        print("Testing individual expert model...")
+        expert_results = expert_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='expert')
+        print(f"Expert model evaluation successful!")
+        print(f"Expert results: {expert_results}")
+    except Exception as e:
+        print(f"Expert model evaluation failed: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("\n=== Now testing MoE model ===")
     trainer = Trainer(
         model=moe_detector,
         args=training_args,
         eval_dataset=test_dataset,
         processing_class=image_processors[0],
         data_collator=moe_collate_fn,
-        compute_metrics=eval_compute_metrics_fn,  # Use original function directly
+        compute_metrics=eval_compute_metrics_fn,
     )
-    
-    print(f'Test loader: {len(test_dataset)} samples')
-    
-    # Test a single batch to verify label structure with original collate
-    test_batch = collate_fn([test_dataset[0], test_dataset[1]])
-    print(f"Original collate label structure: {type(test_batch['labels'][0])}")
-    if hasattr(test_batch['labels'][0], 'keys'):
-        print(f"Original collate label keys: {test_batch['labels'][0].keys()}")
     
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     
