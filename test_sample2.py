@@ -312,7 +312,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         print(f"  Expert output keys: {list(expert_output.keys()) if hasattr(expert_output, 'keys') else 'No keys method'}")
                         print(f"  MoE output keys: {list(moe_output.keys()) if hasattr(moe_output, 'keys') else 'No keys method'}")
                     
-                    # Create a wrapper for MoE model that adds missing loss
+                    # Create a wrapper for MoE model that adds missing loss and last_hidden_state
                     class MoEModelWithLoss(torch.nn.Module):
                         def __init__(self, moe_model):
                             super().__init__()
@@ -321,34 +321,44 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         def forward(self, pixel_values, labels=None):
                             outputs = self.moe_model(pixel_values)
                             
-                            # Add missing loss as 0 if not present
-                            if not hasattr(outputs, 'loss') or outputs.loss is None:
-                                # Create a dummy loss
-                                loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=True)
-                                # Create new output with loss
-                                from types import SimpleNamespace
-                                new_outputs = SimpleNamespace()
-                                new_outputs.loss = loss
-                                new_outputs.logits = outputs.logits
-                                new_outputs.pred_boxes = outputs.pred_boxes
-                                if hasattr(outputs, 'last_hidden_state'):
-                                    new_outputs.last_hidden_state = outputs.last_hidden_state
-                                return new_outputs
+                            # Create output that matches expert model exactly
+                            from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
                             
-                            return outputs
+                            # Add missing components to match expert output
+                            loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=True) if not hasattr(outputs, 'loss') or outputs.loss is None else outputs.loss
+                            
+                            # Create dummy last_hidden_state if missing (same shape as expert)
+                            if not hasattr(outputs, 'last_hidden_state'):
+                                # Create dummy last_hidden_state with appropriate shape
+                                batch_size, num_queries, hidden_size = outputs.logits.shape[0], outputs.logits.shape[1], 256
+                                last_hidden_state = torch.zeros(batch_size, num_queries, hidden_size, device=outputs.logits.device)
+                            else:
+                                last_hidden_state = outputs.last_hidden_state
+                            
+                            # Return YolosObjectDetectionOutput with all required fields
+                            return YolosObjectDetectionOutput(
+                                loss=loss,
+                                logits=outputs.logits,
+                                pred_boxes=outputs.pred_boxes,
+                                last_hidden_state=last_hidden_state
+                            )
                     
-                    # Wrap MoE model to ensure it has loss
+                    # Wrap MoE model to ensure it has same output format as expert
                     moe_model_with_loss = MoEModelWithLoss(moe_detector).to(device)
                     
                     # Test the wrapped model
                     with torch.no_grad():
                         test_output = moe_model_with_loss(debug_batch['pixel_values'].to(device))
                         print(f"DEBUG Wrapped MoE output:")
+                        print(f"  Output type: {type(test_output)}")
                         print(f"  Has loss attr: {hasattr(test_output, 'loss')}")
+                        print(f"  Has last_hidden_state attr: {hasattr(test_output, 'last_hidden_state')}")
+                        print(f"  Output keys: {list(test_output.keys()) if hasattr(test_output, 'keys') else 'No keys method'}")
                         print(f"  Loss value: {test_output.loss}")
                         print(f"  Logits shape: {test_output.logits.shape}")
                         print(f"  Pred boxes shape: {test_output.pred_boxes.shape}")
-                    
+                        print(f"  Last hidden state shape: {test_output.last_hidden_state.shape if hasattr(test_output, 'last_hidden_state') else 'None'}")
+
                     # Create MoE trainer with wrapped model
                     moe_trainer = Trainer(
                         model=moe_model_with_loss,
