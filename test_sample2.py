@@ -59,6 +59,11 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         label2id={'cancer': 0},
         auxiliary_loss=False,
     )
+    
+    # Move model to device and set to eval mode
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
 
     test_dataset = BreastCancerDataset(
         split='test',
@@ -95,7 +100,6 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
             print(f"  Labels content: {gt_labels}")
         
         # Get predictions from expert
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         pixel_values_single = random_sample['pixel_values'].unsqueeze(0).to(device)
         
         with torch.no_grad():
@@ -123,14 +127,15 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                 expert_paths = [os.path.join(expert_dir, name) for name in expert_names if os.path.exists(os.path.join(expert_dir, name))]
                 
                 if expert_paths:
-                    models = []
+                    models_list = []
                     for path in expert_paths:
                         processor = AutoImageProcessor.from_pretrained(path)
                         expert_model = get_yolos_model(path, processor, 'yolos').to(device)
-                        models.append(expert_model)
+                        expert_model.eval()
+                        models_list.append(expert_model)
                     
-                    if len(models) >= 2:
-                        integrated_moe = IntegratedMoE(models, n_models=len(models), top_k=2)
+                    if len(models_list) >= 2:
+                        integrated_moe = IntegratedMoE(models_list, n_models=len(models_list), top_k=2)
                         # Load with strict=False to ignore mismatched keys
                         state_dict = torch.load(moe_model, map_location=device)
                         missing, unexpected = integrated_moe.load_state_dict(state_dict, strict=False)
