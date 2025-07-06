@@ -322,6 +322,12 @@ class MoEObjectDetectionModel(nn.Module):
                     return self.loss
                 elif key == "loss":
                     return self.loss
+                elif isinstance(key, slice):
+                    # Handle slice operations like outputs[1:]
+                    if key == slice(1, None, None):  # outputs[1:]
+                        return (self.logits,)
+                    else:
+                        return ()
                 else:
                     raise KeyError(f"Key {key} not found")
                     
