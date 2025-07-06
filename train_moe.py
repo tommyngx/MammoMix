@@ -121,9 +121,10 @@ class IntegratedMoE(nn.Module):
 class MoETrainer:
     """Trainer for the integrated MoE model."""
     
-    def __init__(self, integrated_moe, device):
+    def __init__(self, integrated_moe, device, output_dir):
         self.model = integrated_moe
         self.device = device
+        self.output_dir = output_dir
         self.model.to(device)
     
     def _extract_targets(self, batch):
@@ -139,6 +140,7 @@ class MoETrainer:
         criterion = nn.BCELoss()
         
         best_val_acc = 0.0
+        best_model_path = os.path.join(self.output_dir, "integrated_moe_best.pth")
         
         for epoch in range(epochs):
             # Training phase
@@ -169,11 +171,14 @@ class MoETrainer:
                 
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
-                    torch.save(self.model.state_dict(), "integrated_moe_best.pth")
+                    # Save only the best model
+                    os.makedirs(self.output_dir, exist_ok=True)
+                    torch.save(self.model.state_dict(), best_model_path)
+                    print(f"New best model saved: {best_model_path}")
                 
                 print(f"Epoch {epoch+1}/{epochs} - Train loss: {avg_train_loss:.4f} - Val acc: {val_acc:.4f}")
         
-        return best_val_acc
+        return best_val_acc, best_model_path
     
     def evaluate(self, data_loader):
         """Evaluate the model on given data loader."""
@@ -259,6 +264,147 @@ def get_model_probs(models, image_processors, data_loader):
 # MAIN TRAINING PIPELINE
 # ================================
 
+class MoEObjectDetectionModel(nn.Module):
+    """
+    Wrapper around IntegratedMoE to provide object detection interface
+    similar to standard YOLOS models for compatibility with test.py
+    """
+    def __init__(self, integrated_moe):
+        super().__init__()
+        self.moe = integrated_moe
+        
+    def forward(self, pixel_values):
+        """Return object detection outputs compatible with test.py evaluation"""
+        # Get MoE prediction
+        final_pred, weights, expert_probs = self.moe(pixel_values)
+        
+        # Create mock object detection output structure
+        # Use the best expert's output as base and modify with MoE prediction
+        best_expert_idx = weights.argmax(dim=1)
+        
+        # Get outputs from all experts to find the best one per sample
+        expert_outputs = []
+        for expert in self.moe.experts:
+            with torch.no_grad():
+                outputs = expert(pixel_values)
+                expert_outputs.append(outputs)
+        
+        # Create combined output using MoE weights
+        batch_size = pixel_values.shape[0]
+        combined_logits = []
+        
+        for i in range(batch_size):
+            # Take the output from the highest weighted expert for this sample
+            best_idx = best_expert_idx[i].item()
+            expert_output = expert_outputs[best_idx]
+            
+            # Modify the logits with MoE final prediction
+            modified_logits = expert_output.logits[i:i+1].clone()
+            # Scale the cancer class logits by MoE confidence
+            moe_confidence = final_pred[i].item()
+            modified_logits[..., 0] = modified_logits[..., 0] * moe_confidence
+            
+            combined_logits.append(modified_logits)
+        
+        # Stack all logits
+        combined_logits = torch.cat(combined_logits, dim=0)
+        
+        # Create output object compatible with transformers
+        from transformers.modeling_outputs import BaseModelOutput
+        class ObjectDetectionOutput:
+            def __init__(self, logits):
+                self.logits = logits
+                
+        return ObjectDetectionOutput(combined_logits)
+
+def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None):
+    """Test the trained MoE model using evaluation metrics like test.py"""
+    from transformers import Trainer, TrainingArguments
+    from evaluation import get_eval_compute_metrics_fn
+    
+    config = load_config(config_path)
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
+    
+    # Load expert models (same as training)
+    if weight_dir is not None:
+        yolos_models = [
+            os.path.join(weight_dir, sub) 
+            for sub in ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
+        ]
+        image_processors = [AutoImageProcessor.from_pretrained(m) for m in yolos_models]
+    else:
+        yolos_models = [
+            config.get('moe', {}).get('model1', 'hustvl/yolos-base'),
+            config.get('moe', {}).get('model2', 'hustvl/yolos-small'),
+            config.get('moe', {}).get('model3', 'hustvl/yolos-tiny'),
+            config.get('moe', {}).get('model4', 'hustvl/yolos-base'),
+        ]
+        image_processors = [get_image_processor(m, MAX_SIZE) for m in yolos_models]
+    
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base') 
+    model_types = [get_model_type(MODEL_NAME) for _ in yolos_models]
+    
+    # Load expert models
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    models = [
+        get_yolos_model(m, ip, mt).to(device)
+        for m, ip, mt in zip(yolos_models, image_processors, model_types)
+    ]
+    
+    # Create MoE model and load trained weights
+    integrated_moe = IntegratedMoE(models, n_models=len(models))
+    integrated_moe.load_state_dict(torch.load(model_path, map_location=device))
+    integrated_moe.eval()
+    
+    # Wrap MoE for object detection compatibility
+    moe_detector = MoEObjectDetectionModel(integrated_moe)
+    
+    # Create test dataset
+    test_dataset = BreastCancerDataset(
+        split='test',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processors[0],
+        model_type=model_types[0],
+        dataset_epoch=epoch
+    )
+    
+    # Setup evaluation using same approach as test.py
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processors[0])
+    
+    training_cfg = config.get('training', {})
+    output_dir = training_cfg.get('output_dir', './moe_output')
+    
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        per_device_eval_batch_size=8,
+        dataloader_num_workers=2,
+        remove_unused_columns=False,
+        report_to=[],
+    )
+    
+    trainer = Trainer(
+        model=moe_detector,
+        args=training_args,
+        eval_dataset=test_dataset,
+        processing_class=image_processors[0],
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    print(f'Test loader: {len(test_dataset)} samples')
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    
+    print("\n=== MoE Test Results ===")
+    for key, value in test_results.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+    
+    return test_results
+
 def main(config_path, epoch=None, dataset=None, weight_dir=None):
     """Main training pipeline for MoE model."""
     # Load configuration
@@ -269,6 +415,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
     
     # Fix: Get epochs from argument -> config -> default (in that order)
     training_cfg = config.get('training', {})
+    output_dir = training_cfg.get('output_dir', './moe_output')
     EPOCHS = epoch if epoch is not None else training_cfg.get('epochs', 50)
 
     # Setup model paths - Add yolos_MOMO as 4th expert
@@ -283,7 +430,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
             config.get('moe', {}).get('model1', 'hustvl/yolos-base'),
             config.get('moe', {}).get('model2', 'hustvl/yolos-small'),
             config.get('moe', {}).get('model3', 'hustvl/yolos-tiny'),
-            config.get('moe', {}).get('model4', 'hustvl/yolos-base'),  # Add 4th model
+            config.get('moe', {}).get('model4', 'hustvl/yolos-base'),
         ]
         image_processors = [get_image_processor(m, MAX_SIZE) for m in yolos_models]
     
@@ -341,15 +488,19 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
     # Create and train integrated MoE
     print("Creating integrated MoE model...")
     integrated_moe = IntegratedMoE(models, n_models=len(models))
-    moe_trainer = MoETrainer(integrated_moe, device)
+    moe_trainer = MoETrainer(integrated_moe, device, output_dir)
     
     print("Training integrated MoE (gating network only)...")
-    best_acc = moe_trainer.train_gate_only(train_loader, val_loader, epochs=EPOCHS)
+    best_acc, best_model_path = moe_trainer.train_gate_only(train_loader, val_loader, epochs=EPOCHS)
     
-    # Save final model
-    torch.save(integrated_moe.state_dict(), "integrated_moe_final.pth")
     print(f"Training completed! Best validation accuracy: {best_acc:.4f}")
-    print("Models saved: integrated_moe_best.pth, integrated_moe_final.pth")
+    print(f"Best model saved at: {best_model_path}")
+    
+    # Test the trained model using object detection evaluation
+    print("\n=== Testing trained MoE model with object detection metrics ===")
+    test_results = test_moe_model(config_path, best_model_path, DATASET_NAME, weight_dir, epoch)
+    
+    return best_acc, test_results
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train MoE model with gating network")
