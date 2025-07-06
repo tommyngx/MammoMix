@@ -196,6 +196,14 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
         eval_pred.predictions = predictions_formatted
         eval_pred.label_ids = targets_formatted
         
+        # Add debugging before calling evaluation
+        print(f"DEBUG: First prediction batch shape: {predictions_formatted[0][1].shape}")
+        print(f"DEBUG: First prediction values sample: {predictions_formatted[0][1][0, :3, :]}")
+        print(f"DEBUG: First target batch length: {len(targets_formatted[0])}")
+        if len(targets_formatted[0]) > 0:
+            print(f"DEBUG: First target sample keys: {targets_formatted[0][0].keys()}")
+            print(f"DEBUG: First target boxes: {targets_formatted[0][0].get('boxes', [])}")
+        
         # Call evaluation function directly
         metrics = eval_compute_metrics_fn(eval_pred)
         
@@ -416,14 +424,6 @@ if __name__ == "__main__":
         args.num_samples = int(args.num_samples)
     
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
-    print(f"\n=== Summary Comparison ===")
-    if test_results:
-        expert_map = test_results.get('test_map', 'N/A')
-        print(f"Expert ({DATASET_NAME}) mAP: {expert_map}")
-    
-    if moe_results:
-        moe_map = moe_results.get('moe_map', 'N/A')
-        print(f"MoE (all experts) mAP: {moe_map}")
     else:
         print("MoE: Not tested or failed")
 
