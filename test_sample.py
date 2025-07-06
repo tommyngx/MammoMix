@@ -269,7 +269,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
     print(f'Limited to: {len(test_dataset)} samples')
     
     # Print individual sample details
-    print(f"\n=== Sample Details (First 4) ===")
+    print(f"\n=== Sample Details (First 2) ===")
     for i in range(min(2, len(test_dataset))):
         try:
             sample = test_dataset[i]
@@ -286,27 +286,14 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                 print(f"  Boxes: {boxes}")
                 classes = labels.get('class_labels', [])
                 print(f"  Classes: {classes}")
-                print(f"  Areas: {labels.get('area', [])}")
-                print(f"  Size: {labels.get('size', 'N/A')}")
-                print(f"  Orig size: {labels.get('orig_size', 'N/A')}")
             print("-" * 50)
         except Exception as e:
             print(f"Error loading sample {i}: {e}")
-            import traceback
-            traceback.print_exc()
     
+    # Test dataset-specific expert model only once
+    print(f"\n=== Testing Dataset-Specific Expert: {DATASET_NAME} ===")
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-    print("\n=== Test Results ===")
-    for key, value in test_results.items():
-        if isinstance(value, float):
-            print(f"{key}: {value:.4f}")
-        else:
-            print(f"{key}: {value}")
-    
-    # Test individual expert model
-    print(f"\n=== Testing Individual Expert Model ===")
-    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-    print("\n=== Expert Test Results ===")
+    print(f"\n=== Expert ({DATASET_NAME}) Test Results ===")
     for key, value in test_results.items():
         if isinstance(value, float):
             print(f"{key}: {value:.4f}")
@@ -338,6 +325,8 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
     if moe_results:
         moe_map = moe_results.get('moe_map', 'N/A')
         print(f"MoE (all experts) mAP: {moe_map}")
+    else:
+        print("MoE: Not tested or failed")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
