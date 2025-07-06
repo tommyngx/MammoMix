@@ -176,6 +176,21 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     print(f"\n=== Testing MoE Model ===")
     
     try:
+        # Add debug to see what's being passed to evaluation
+        print(f"DEBUG: Test dataset type: {type(test_dataset)}")
+        print(f"DEBUG: Test dataset length: {len(test_dataset)}")
+        
+        # Test a single batch to see the data structure
+        from torch.utils.data import DataLoader
+        test_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn)
+        sample_batch = next(iter(test_loader))
+        
+        print(f"DEBUG: Sample batch keys: {sample_batch.keys()}")
+        print(f"DEBUG: Sample batch labels type: {type(sample_batch['labels'])}")
+        print(f"DEBUG: Sample batch labels length: {len(sample_batch['labels'])}")
+        if len(sample_batch['labels']) > 0:
+            print(f"DEBUG: First label type: {type(sample_batch['labels'][0])}")
+        
         test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
         
         print("\n=== MoE Test Results ===")
