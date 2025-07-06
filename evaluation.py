@@ -52,24 +52,24 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
     post_processed_predictions = []
     predictions, targets = evaluation_results.predictions, evaluation_results.label_ids
 
-    #print(f"DEBUG: targets type: {type(targets)}")
-    #print(f"DEBUG: targets length: {len(targets)}")
-    if len(targets) > 0:
-        #print(f"DEBUG: first target type: {type(targets[0])}")
-        #print(f"DEBUG: first target content: {targets[0]}")
+    # print(f"DEBUG: targets type: {type(targets)}")
+    # print(f"DEBUG: targets length: {len(targets)}")
+    # if len(targets) > 0:
+    #     print(f"DEBUG: first target type: {type(targets[0])}")
+    #     print(f"DEBUG: first target content: {targets[0]}")
 
     for batch in targets:
-        #print(f"DEBUG: processing batch type: {type(batch)}")
-        #print(f"DEBUG: batch content: {batch}")
+        # print(f"DEBUG: processing batch type: {type(batch)}")
+        # print(f"DEBUG: batch content: {batch}")
         #batch_image_sizes = torch.tensor(np.array([x['size'] for x in batch]))
         batch_image_sizes = torch.tensor(np.array([[MAX_SIZE, MAX_SIZE] for _ in batch]))
         image_sizes.append(batch_image_sizes)
         for image_target in batch:
-            print(f"DEBUG: image_target type: {type(image_target)}")
-            print(f"DEBUG: image_target content: {image_target}")
-            #print(f"DEBUG: Attempting to access image_target['boxes']...")
+            # print(f"DEBUG: image_target type: {type(image_target)}")
+            # print(f"DEBUG: image_target content: {image_target}")
+            # print(f"DEBUG: Attempting to access image_target['boxes']...")
             boxes = torch.tensor(image_target['boxes'])
-            #print(f"DEBUG: boxes: {boxes}")
+            # print(f"DEBUG: boxes: {boxes}")
             #boxes = convert_bbox_yolo_to_pascal(boxes, image_target['size'])
             boxes = convert_bbox_yolo_to_pascal(boxes, [MAX_SIZE, MAX_SIZE])
             labels = torch.tensor(image_target['class_labels'])
