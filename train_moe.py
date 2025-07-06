@@ -473,166 +473,27 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     # Custom data collator that preserves label structure
     def moe_collate_fn(examples):
-        batch = collate_fn(examples)
-        
-        # Ensure labels are in the correct format for evaluation
-        if 'labels' in batch:
-            # Convert labels to the format expected by evaluation
-            formatted_labels = []
-            for i, labels_item in enumerate(batch['labels']):
-                # Handle BatchFeature objects from transformers
-                if hasattr(labels_item, 'data') and isinstance(labels_item.data, dict):
-                    # Convert BatchFeature to regular dict
-                    label_dict = dict(labels_item.data)
-                    formatted_labels.append(label_dict)
-                elif isinstance(labels_item, dict):
-                    # Already a regular dict
-                    formatted_labels.append(labels_item)
-                elif hasattr(labels_item, '__dict__'):
-                    # Try to convert object with attributes to dict
-                    try:
-                        label_dict = {
-                            'boxes': getattr(labels_item, 'boxes', torch.tensor([]).reshape(0, 4)),
-                            'class_labels': getattr(labels_item, 'class_labels', torch.tensor([])),
-                            'image_id': getattr(labels_item, 'image_id', torch.tensor([i])),
-                            'size': getattr(labels_item, 'size', torch.tensor([640, 640])),
-                            'area': getattr(labels_item, 'area', torch.tensor([])),
-                            'iscrowd': getattr(labels_item, 'iscrowd', torch.tensor([])),
-                            'orig_size': getattr(labels_item, 'orig_size', torch.tensor([640, 640]))
-                        }
-                        formatted_labels.append(label_dict)
-                    except Exception as e:
-                        # Create empty label dict for consistency
-                        empty_label = {
-                            'boxes': torch.tensor([]).reshape(0, 4),
-                            'class_labels': torch.tensor([]),
-                            'image_id': torch.tensor([i]),
-                            'size': torch.tensor([640, 640]),
-                            'area': torch.tensor([]),
-                            'iscrowd': torch.tensor([]),
-                            'orig_size': torch.tensor([640, 640])
-                        }
-                        formatted_labels.append(empty_label)
-                else:
-                    # Create empty label dict for consistency
-                    empty_label = {
-                        'boxes': torch.tensor([]).reshape(0, 4),
-                        'class_labels': torch.tensor([]),
-                        'image_id': torch.tensor([i]),
-                        'size': torch.tensor([640, 640]),
-                        'area': torch.tensor([]),
-                        'iscrowd': torch.tensor([]),
-                        'orig_size': torch.tensor([640, 640])
-                    }
-                    formatted_labels.append(empty_label)
-            
-            batch['labels'] = formatted_labels
-        
-        return batch
+        # Use the original collate_fn but don't modify the labels
+        # The issue is likely that we're over-processing the labels
+        return collate_fn(examples)
     
-    # Let's also create a custom compute_metrics function that adds debugging
-    def debug_compute_metrics(eval_pred):
-        """Debug wrapper around the original compute_metrics function"""
-        print(f"DEBUG compute_metrics: eval_pred type: {type(eval_pred)}")
-        print(f"DEBUG compute_metrics: eval_pred keys: {eval_pred.keys() if hasattr(eval_pred, 'keys') else 'No keys'}")
-        
-        if hasattr(eval_pred, 'label_ids'):
-            print(f"DEBUG compute_metrics: label_ids type: {type(eval_pred.label_ids)}")
-            if eval_pred.label_ids is not None and len(eval_pred.label_ids) > 0:
-                print(f"DEBUG compute_metrics: first label type: {type(eval_pred.label_ids[0])}")
-                print(f"DEBUG compute_metrics: first label content keys: {eval_pred.label_ids[0].keys() if isinstance(eval_pred.label_ids[0], dict) else 'Not a dict'}")
-                
-                # The issue is that the evaluation expects individual image targets
-                # but we're getting batch-level concatenated data. Let's restructure it.
-                
-                # Check if we have the flattened format and need to restructure
-                if isinstance(eval_pred.label_ids[0], dict) and 'image_id' in eval_pred.label_ids[0]:
-                    first_label = eval_pred.label_ids[0]
-                    if isinstance(first_label['image_id'], (list, tuple, np.ndarray)) and len(first_label['image_id']) > 1:
-                        # We have flattened data - need to restructure to individual images
-                        print("DEBUG: Restructuring flattened labels to individual image targets...")
-                        
-                        # Extract the individual components
-                        image_ids = first_label['image_id']
-                        boxes = first_label['boxes']
-                        class_labels = first_label['class_labels']
-                        areas = first_label['area']
-                        iscrowd = first_label['iscrowd']
-                        sizes = first_label['size'].reshape(-1, 2)  # Reshape to (n_images, 2)
-                        orig_sizes = first_label['orig_size'].reshape(-1, 2)  # Reshape to (n_images, 2)
-                        
-                        # Reconstruct individual image targets
-                        restructured_labels = []
-                        for i, img_id in enumerate(image_ids):
-                            # Each image gets one box (since we have equal number of images and boxes)
-                            individual_target = {
-                                'image_id': torch.tensor([int(img_id)]),
-                                'boxes': torch.tensor(np.array([boxes[i]], dtype=np.float32)).reshape(1, 4),
-                                'class_labels': torch.tensor([int(class_labels[i])]),
-                                'area': torch.tensor([float(areas[i])]),
-                                'iscrowd': torch.tensor([int(iscrowd[i])]),
-                                'size': torch.tensor(sizes[i].astype(np.int32)),
-                                'orig_size': torch.tensor(orig_sizes[i].astype(np.int32))
-                            }
-                            restructured_labels.append(individual_target)
-                        
-                        # Create a new eval_pred with restructured labels
-                        class RestructuredEvalPred:
-                            def __init__(self, predictions, label_ids):
-                                self.predictions = predictions
-                                self.label_ids = label_ids
-                        
-                        eval_pred = RestructuredEvalPred(eval_pred.predictions, restructured_labels)
-                        print(f"DEBUG: Restructured to {len(restructured_labels)} individual targets")
-                        print(f"DEBUG: First restructured target type: {type(restructured_labels[0])}")
-                        print(f"DEBUG: First restructured target keys: {restructured_labels[0].keys()}")
-                        print(f"DEBUG: First restructured boxes type: {type(restructured_labels[0]['boxes'])}")
-                        print(f"DEBUG: First restructured boxes shape: {restructured_labels[0]['boxes'].shape}")
-        
-        # Create a custom evaluation function that has extra debugging
-        def debug_eval_compute_metrics_fn(eval_pred):
-            """Debug version of the evaluation function"""
-            print(f"DEBUG inside eval_compute_metrics_fn: eval_pred type: {type(eval_pred)}")
-            print(f"DEBUG inside eval_compute_metrics_fn: label_ids type: {type(eval_pred.label_ids)}")
-            print(f"DEBUG inside eval_compute_metrics_fn: label_ids length: {len(eval_pred.label_ids)}")
-            
-            if len(eval_pred.label_ids) > 0:
-                first_target = eval_pred.label_ids[0]
-                print(f"DEBUG inside eval_compute_metrics_fn: first_target type: {type(first_target)}")
-                print(f"DEBUG inside eval_compute_metrics_fn: first_target: {first_target}")
-                
-                if isinstance(first_target, dict):
-                    print(f"DEBUG inside eval_compute_metrics_fn: first_target keys: {first_target.keys()}")
-                    if 'boxes' in first_target:
-                        print(f"DEBUG inside eval_compute_metrics_fn: boxes type: {type(first_target['boxes'])}")
-                        print(f"DEBUG inside eval_compute_metrics_fn: boxes value: {first_target['boxes']}")
-                    else:
-                        print("DEBUG inside eval_compute_metrics_fn: 'boxes' key not found!")
-                else:
-                    print(f"DEBUG inside eval_compute_metrics_fn: first_target is not a dict, it's a {type(first_target)}")
-            
-            # Call the original evaluation function
-            return eval_compute_metrics_fn(eval_pred)
-        
-        # Call the debug version instead
-        return debug_eval_compute_metrics_fn(eval_pred)
-    
+    # Remove the debug wrapper and use the original evaluation function directly
     trainer = Trainer(
         model=moe_detector,
         args=training_args,
         eval_dataset=test_dataset,
         processing_class=image_processors[0],
         data_collator=moe_collate_fn,
-        compute_metrics=debug_compute_metrics,
+        compute_metrics=eval_compute_metrics_fn,  # Use original function directly
     )
     
     print(f'Test loader: {len(test_dataset)} samples')
     
-    # Test a single batch to verify label structure
-    test_batch = moe_collate_fn([test_dataset[0], test_dataset[1]])
-    print(f"Test batch label structure: {type(test_batch['labels'][0])}")
-    print(f"Test batch label keys: {test_batch['labels'][0].keys()}")
-    print(f"Test batch boxes type: {type(test_batch['labels'][0]['boxes'])}")
+    # Test a single batch to verify label structure with original collate
+    test_batch = collate_fn([test_dataset[0], test_dataset[1]])
+    print(f"Original collate label structure: {type(test_batch['labels'][0])}")
+    if hasattr(test_batch['labels'][0], 'keys'):
+        print(f"Original collate label keys: {test_batch['labels'][0].keys()}")
     
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     
