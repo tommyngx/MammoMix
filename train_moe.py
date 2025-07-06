@@ -17,22 +17,27 @@ os.environ['ABSL_LOG_LEVEL'] = '3'
 os.environ["GRPC_VERBOSITY"] = "ERROR"
 os.environ["GLOG_minloglevel"] = "2"
 
-# Redirect stderr to suppress cuDNN/cuBLAS warnings
-import sys
+# More aggressive warning suppression
 import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-class DevNull:
+# Apply to all warning sources
+import sys
+import logging
+logging.getLogger().setLevel(logging.ERROR)
+
+# Completely suppress stderr during imports if needed
+class CompleteDevNull:
     def write(self, msg):
-        # Only suppress lines containing specific CUDA warnings
-        if any(x in msg for x in ["Unable to register cuDNN", "Unable to register cuBLAS", "All log messages before absl"]):
-            return
-        sys.__stderr__.write(msg)
+        pass
     def flush(self):
-        sys.__stderr__.flush()
+        pass
 
-# Apply stderr filter
-sys.stderr = DevNull()
-warnings.filterwarnings("ignore")
+# Use complete suppression during sensitive imports
+original_stderr = sys.stderr
+sys.stderr = CompleteDevNull()
 
 import numpy as np
 import yaml
@@ -53,6 +58,9 @@ from transformers import (
 
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
+
+# Restore stderr after imports
+sys.stderr = original_stderr
 
 # ================================
 # CONFIGURATION & UTILITIES
