@@ -149,6 +149,33 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
         if len(sample_batch['labels']) > 0:
             print(f"DEBUG: First label type: {type(sample_batch['labels'][0])}")
         
+        # Test MoE model output on this batch
+        print(f"\nDEBUG: Testing MoE model output...")
+        pixel_values = sample_batch['pixel_values'].to(device)
+        print(f"DEBUG: Input to MoE shape: {pixel_values.shape}")
+        
+        with torch.no_grad():
+            moe_output = moe_detector(pixel_values)
+            print(f"DEBUG: MoE output type: {type(moe_output)}")
+            print(f"DEBUG: MoE output attributes: {dir(moe_output)}")
+            if hasattr(moe_output, 'logits'):
+                print(f"DEBUG: MoE logits shape: {moe_output.logits.shape}")
+                print(f"DEBUG: MoE logits sample: {moe_output.logits[0, :3, :]}")  # First 3 queries
+            if hasattr(moe_output, 'pred_boxes'):
+                print(f"DEBUG: MoE pred_boxes shape: {moe_output.pred_boxes.shape}")
+            if hasattr(moe_output, 'loss'):
+                print(f"DEBUG: MoE loss: {moe_output.loss}")
+        
+        # Compare with expert model output for same batch
+        print(f"\nDEBUG: Comparing with expert model output...")
+        expert_model = models[0]  # Use first expert for comparison
+        with torch.no_grad():
+            expert_output = expert_model(pixel_values)
+            print(f"DEBUG: Expert output type: {type(expert_output)}")
+            if hasattr(expert_output, 'logits'):
+                print(f"DEBUG: Expert logits shape: {expert_output.logits.shape}")
+                print(f"DEBUG: Expert logits sample: {expert_output.logits[0, :3, :]}")  # First 3 queries
+        
         test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
         
         print("\n=== MoE Test Results ===")
