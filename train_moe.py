@@ -370,39 +370,9 @@ class MoEObjectDetectionModel(nn.Module):
         # Get MoE combined output - this now returns properly structured output
         combined_outputs, final_pred, weights, expert_probs, top_indices = self.moe(pixel_values)
         
-        # The issue might be here - we need to preserve the original labels structure
-        # Don't modify the combined_outputs, instead create a new one that maintains labels
-        class ObjectDetectionOutputWithLabels:
-            def __init__(self, logits, pred_boxes=None, labels=None):
-                self.logits = logits
-                self.pred_boxes = pred_boxes
-                self.labels = labels
-                self.loss = torch.tensor(0.0, device=logits.device, requires_grad=False)
-                
-            def __getitem__(self, key):
-                """Make object subscriptable for Trainer compatibility"""
-                if key == 0:
-                    return self.loss
-                elif key == "loss":
-                    return self.loss
-                elif isinstance(key, slice):
-                    if key == slice(1, None, None):  # outputs[1:]
-                        return (self.logits,)
-                    else:
-                        return ()
-                else:
-                    raise KeyError(f"Key {key} not found")
-                    
-            def keys(self):
-                """Return available keys"""
-                return ["loss", "logits", "pred_boxes", "labels"]
-        
-        # Create new output that preserves labels
-        return ObjectDetectionOutputWithLabels(
-            logits=combined_outputs.logits,
-            pred_boxes=combined_outputs.pred_boxes,
-            labels=labels
-        )
+        # Return the combined outputs directly without any wrapper
+        # This should be identical to what individual expert models return
+        return combined_outputs
 
 def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None):
     """Test the trained MoE model using evaluation metrics like test.py"""
