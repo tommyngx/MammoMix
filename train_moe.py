@@ -443,10 +443,71 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     # Custom data collator that preserves label structure
     def moe_collate_fn(examples):
-        # Use the original collate_fn but don't modify the labels
-        # The issue is likely that we're over-processing the labels
-        return collate_fn(examples)
-    
+        # The issue is that collate_fn is creating a BatchFeature with concatenated data
+        # but evaluation expects individual image targets
+        batch = collate_fn(examples)
+        
+        # Convert the BatchFeature labels back to individual dictionaries
+        if 'labels' in batch and len(batch['labels']) > 0:
+            labels_batch_feature = batch['labels'][0]  # This is the concatenated BatchFeature
+            
+            # Extract individual components
+            if isinstance(labels_batch_feature, dict) and 'image_id' in labels_batch_feature:
+                image_ids = labels_batch_feature['image_id']
+                boxes = labels_batch_feature['boxes']
+                class_labels = labels_batch_feature['class_labels']
+                areas = labels_batch_feature['area']
+                iscrowd = labels_batch_feature['iscrowd']
+                sizes = labels_batch_feature['size']
+                orig_sizes = labels_batch_feature['orig_size']
+                
+                # Reconstruct individual image labels
+                individual_labels = []
+                box_idx = 0
+                
+                for img_idx, img_id in enumerate(image_ids):
+                    # Count how many boxes belong to this image
+                    # We need to figure out how many boxes each image has
+                    # For now, let's assume each image has at least one box
+                    # and group consecutive boxes by image_id
+                    
+                    # Find all boxes for this image_id
+                    image_boxes = []
+                    image_class_labels = []
+                    image_areas = []
+                    image_iscrowd = []
+                    
+                    # Simple approach: each consecutive box until we hit a different image pattern
+                    # Since boxes are concatenated, we need to split them properly
+                    # For now, let's try a simpler approach - distribute boxes evenly
+                    
+                    num_images = len(image_ids)
+                    total_boxes = len(boxes)
+                    
+                    if box_idx < len(boxes):
+                        # Take one box per image for simplicity
+                        # This may need adjustment based on your actual data structure
+                        image_boxes = [boxes[box_idx]]
+                        image_class_labels = [class_labels[box_idx]] if box_idx < len(class_labels) else [0]
+                        image_areas = [areas[box_idx]] if box_idx < len(areas) else [0]
+                        image_iscrowd = [iscrowd[box_idx]] if box_idx < len(iscrowd) else [0]
+                        box_idx += 1
+                    
+                    individual_target = {
+                        'image_id': torch.tensor([img_id]),
+                        'boxes': torch.tensor(image_boxes).reshape(-1, 4),
+                        'class_labels': torch.tensor(image_class_labels),
+                        'area': torch.tensor(image_areas),
+                        'iscrowd': torch.tensor(image_iscrowd),
+                        'size': torch.tensor([sizes[img_idx*2], sizes[img_idx*2+1]]) if img_idx*2+1 < len(sizes) else torch.tensor([640, 640]),
+                        'orig_size': torch.tensor([orig_sizes[img_idx*2], orig_sizes[img_idx*2+1]]) if img_idx*2+1 < len(orig_sizes) else torch.tensor([640, 640])
+                    }
+                    individual_labels.append(individual_target)
+                
+                batch['labels'] = individual_labels
+        
+        return batch
+
     # DEBUG: Compare individual expert model vs MoE model with Trainer
     print("\n=== DEBUG: Testing individual expert first ===")
     expert_trainer = Trainer(
