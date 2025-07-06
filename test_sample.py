@@ -78,8 +78,8 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     """Test MoE model and print sample outputs"""
     
     print(f"DEBUG: Starting MoE model testing...")
-    print(f"DEBUG: MoE model path: {moe_model_path}")
-    print(f"DEBUG: Expert directory: {expert_dir}")
+    #print(f"DEBUG: MoE model path: {moe_model_path}")
+    #print(f"DEBUG: Expert directory: {expert_dir}")
     
     # Load all expert models for MoE
     expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
@@ -116,11 +116,15 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     print(f"DEBUG: Loading MoE state dict...")
     integrated_moe.load_state_dict(torch.load(moe_model_path, map_location=device))
     integrated_moe.eval()
-    print(f"DEBUG: MoE model loaded and set to eval mode")
+    
+    # Move entire MoE model to device
+    integrated_moe = integrated_moe.to(device)
+    print(f"DEBUG: MoE model loaded and moved to {device}")
     
     # Wrap for compatibility
     print(f"DEBUG: Wrapping MoE for object detection...")
     moe_detector = MoEObjectDetectionModel(integrated_moe)
+    moe_detector = moe_detector.to(device)  # Ensure wrapper is also on device
     
     # Setup evaluation
     print(f"DEBUG: Setting up evaluation function...")
