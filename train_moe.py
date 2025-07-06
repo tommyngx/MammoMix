@@ -467,25 +467,45 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
             
             # Convert labels to the format expected by evaluation
             formatted_labels = []
-            for i, labels_list in enumerate(batch['labels']):
-                print(f"DEBUG: Processing label {i}, type: {type(labels_list)}, content: {labels_list}")
+            for i, labels_item in enumerate(batch['labels']):
+                print(f"DEBUG: Processing label {i}, type: {type(labels_item)}")
                 
-                if isinstance(labels_list, list) and len(labels_list) > 0:
-                    # Take the first label dict if it's a list
-                    first_label = labels_list[0]
-                    print(f"DEBUG: First label in list type: {type(first_label)}, content: {first_label}")
-                    formatted_labels.append(first_label)
-                elif isinstance(labels_list, dict):
-                    # Already in correct format
-                    print(f"DEBUG: Label is dict: {labels_list}")
-                    formatted_labels.append(labels_list)
+                # Handle BatchFeature objects from transformers
+                if hasattr(labels_item, 'data') and isinstance(labels_item.data, dict):
+                    # Convert BatchFeature to regular dict
+                    label_dict = dict(labels_item.data)
+                    print(f"DEBUG: Converted BatchFeature to dict: {label_dict}")
+                    formatted_labels.append(label_dict)
+                elif isinstance(labels_item, dict):
+                    # Already a regular dict
+                    print(f"DEBUG: Label is already dict: {labels_item}")
+                    formatted_labels.append(labels_item)
+                elif hasattr(labels_item, '__dict__'):
+                    # Try to convert object with attributes to dict
+                    try:
+                        label_dict = {
+                            'boxes': labels_item.get('boxes', torch.tensor([]).reshape(0, 4)),
+                            'class_labels': labels_item.get('class_labels', torch.tensor([])),
+                            'image_id': labels_item.get('image_id', torch.tensor([i]))
+                        }
+                        print(f"DEBUG: Converted object to dict: {label_dict}")
+                        formatted_labels.append(label_dict)
+                    except Exception as e:
+                        print(f"DEBUG: Failed to convert object, creating empty: {e}")
+                        # Create empty label dict for consistency
+                        empty_label = {
+                            'boxes': torch.tensor([]).reshape(0, 4),
+                            'class_labels': torch.tensor([]),
+                            'image_id': torch.tensor([i])
+                        }
+                        formatted_labels.append(empty_label)
                 else:
                     # Create empty label dict for consistency
-                    print(f"DEBUG: Creating empty label dict for type: {type(labels_list)}")
+                    print(f"DEBUG: Creating empty label dict for unknown type: {type(labels_item)}")
                     empty_label = {
                         'boxes': torch.tensor([]).reshape(0, 4),
                         'class_labels': torch.tensor([]),
-                        'image_id': torch.tensor(i)  # Use index as image_id
+                        'image_id': torch.tensor([i])
                     }
                     formatted_labels.append(empty_label)
             
@@ -494,6 +514,8 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
             if len(formatted_labels) > 0:
                 print(f"DEBUG: Final first label type: {type(formatted_labels[0])}")
                 print(f"DEBUG: Final first label keys: {formatted_labels[0].keys() if isinstance(formatted_labels[0], dict) else 'Not a dict'}")
+                if isinstance(formatted_labels[0], dict) and 'boxes' in formatted_labels[0]:
+                    print(f"DEBUG: First label boxes: {formatted_labels[0]['boxes']}")
         
         return batch
     
