@@ -350,28 +350,6 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
     print(f'Original test dataset: {original_size} samples')
     print(f'Limited to: {len(test_dataset)} samples')
     
-    # Print individual sample details
-    print(f"\n=== Sample Details (First 2) ===")
-    for i in range(min(2, len(test_dataset))):
-        try:
-            sample = test_dataset[i]
-            labels = sample['labels']
-            print(f"Sample {i}:")
-            print(f"  Image shape: {sample['pixel_values'].shape}")
-            print(f"  Image dtype: {sample['pixel_values'].dtype}")
-            print(f"  Labels type: {type(labels)}")
-            
-            if isinstance(labels, dict):
-                print(f"  Image ID: {labels.get('image_id', 'N/A')}")
-                boxes = labels.get('boxes', [])
-                print(f"  Boxes shape: {np.array(boxes).shape if len(boxes) > 0 else 'Empty'}")
-                print(f"  Boxes: {boxes}")
-                classes = labels.get('class_labels', [])
-                print(f"  Classes: {classes}")
-            print("-" * 50)
-        except Exception as e:
-            print(f"Error loading sample {i}: {e}")
-    
     # Test dataset-specific expert model only once
     print(f"\n=== Testing Dataset-Specific Expert: {DATASET_NAME} ===")
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
@@ -382,6 +360,20 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         else:
             print(f"{key}: {value}")
     
+    # Show expert model output for comparison
+    print(f"\n=== Expert Model Output Analysis ===")
+    test_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn)
+    sample_batch = next(iter(test_loader))
+    pixel_values = sample_batch['pixel_values'].to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    
+    with torch.no_grad():
+        expert_output = model(pixel_values)
+        print(f"Expert output type: {type(expert_output)}")
+        print(f"Expert logits shape: {expert_output.logits.shape}")
+        print(f"Expert pred_boxes shape: {expert_output.pred_boxes.shape}")
+        print(f"Expert logits sample (first 3 queries):")
+        print(expert_output.logits[0, :3, :])
+        
     # Test MoE model if provided
     moe_results = None
     if moe_model and os.path.exists(moe_model):
@@ -451,6 +443,14 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
+    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
+    parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
+    args = parser.parse_args()
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
     parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
