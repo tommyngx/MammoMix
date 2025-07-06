@@ -441,21 +441,85 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
         report_to=[],
     )
     
-    # Custom data collator that preserves label structure exactly like test.py
+    # Custom data collator that splits concatenated BatchFeature back to individual targets
     def moe_collate_fn(examples):
-        # Use the original collate_fn without any modifications
-        return collate_fn(examples)
+        # Get the batch from original collate_fn
+        batch = collate_fn(examples)
+        
+        # Fix the labels structure to match what evaluation expects
+        if 'labels' in batch and len(batch['labels']) > 0:
+            first_label = batch['labels'][0]
+            
+            # Check if we have a concatenated BatchFeature that needs splitting
+            if (isinstance(first_label, dict) and 'image_id' in first_label and 
+                hasattr(first_label['image_id'], '__len__') and len(first_label['image_id']) > 1):
+                
+                # We have concatenated data - split it back to individual images
+                image_ids = first_label['image_id']
+                boxes = first_label['boxes']
+                class_labels = first_label['class_labels']
+                areas = first_label['area']
+                iscrowd = first_label['iscrowd']
+                sizes = first_label['size']
+                orig_sizes = first_label['orig_size']
+                
+                # Create individual targets for each image
+                individual_targets = []
+                box_start = 0
+                
+                # Map boxes to images based on image_id order
+                for i, img_id in enumerate(image_ids):
+                    # Simple approach: distribute boxes evenly among images
+                    # In practice, you might need more sophisticated logic
+                    boxes_per_image = len(boxes) // len(image_ids)
+                    extra_boxes = len(boxes) % len(image_ids)
+                    
+                    # Give extra boxes to first few images
+                    if i < extra_boxes:
+                        num_boxes = boxes_per_image + 1
+                    else:
+                        num_boxes = boxes_per_image
+                    
+                    box_end = box_start + num_boxes
+                    
+                    # Extract data for this image
+                    if box_start < len(boxes):
+                        image_boxes = boxes[box_start:box_end]
+                        image_class_labels = class_labels[box_start:box_end] if box_start < len(class_labels) else []
+                        image_areas = areas[box_start:box_end] if box_start < len(areas) else []
+                        image_iscrowd = iscrowd[box_start:box_end] if box_start < len(iscrowd) else []
+                    else:
+                        # No boxes for this image
+                        image_boxes = []
+                        image_class_labels = []
+                        image_areas = []
+                        image_iscrowd = []
+                    
+                    # Create target dictionary for this image
+                    target = {
+                        'image_id': np.array([img_id]),
+                        'boxes': np.array(image_boxes).reshape(-1, 4) if len(image_boxes) > 0 else np.array([]).reshape(0, 4),
+                        'class_labels': np.array(image_class_labels),
+                        'area': np.array(image_areas),
+                        'iscrowd': np.array(image_iscrowd),
+                        'size': np.array([640, 640]),
+                        'orig_size': np.array([640, 640])
+                    }
+                    individual_targets.append(target)
+                    box_start = box_end
+                
+                # Replace the concatenated labels with individual targets
+                batch['labels'] = individual_targets
+        
+        return batch
 
-    # Skip the debug comparison with individual expert - go directly to MoE testing
-    # since both are failing with the same issue
-    
     print("\n=== Testing MoE model ===")
     trainer = Trainer(
         model=moe_detector,
         args=training_args,
         eval_dataset=test_dataset,
         processing_class=image_processors[0],
-        data_collator=collate_fn,  # Use original collate_fn directly
+        data_collator=moe_collate_fn,  # Use our custom collate function
         compute_metrics=eval_compute_metrics_fn,
     )
     
