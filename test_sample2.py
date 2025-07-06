@@ -229,6 +229,19 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
     # Evaluate expert
     print(f"\n=== Testing Expert ({DATASET_NAME}) ===")
     try:
+        # Debug: Test expert model output format
+        from torch.utils.data import DataLoader
+        debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+        debug_batch = next(iter(debug_loader))
+        
+        with torch.no_grad():
+            expert_output = model(debug_batch['pixel_values'].to(device))
+            print(f"DEBUG Expert output:")
+            print(f"  Logits shape: {expert_output.logits.shape}")
+            print(f"  Pred boxes shape: {expert_output.pred_boxes.shape}")
+            print(f"  Output type: {type(expert_output)}")
+            print(f"  Has pred_boxes attr: {hasattr(expert_output, 'pred_boxes')}")
+        
         expert_results = expert_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='expert')
         print(f"\n=== Expert ({DATASET_NAME}) Test Results ===")
         for key, value in expert_results.items():
@@ -285,6 +298,25 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         data_collator=collate_fn,
                         compute_metrics=eval_compute_metrics_fn,
                     )
+                    
+                    # Debug: Test MoE model output format
+                    debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+                    debug_batch = next(iter(debug_loader))
+                    
+                    with torch.no_grad():
+                        moe_output = moe_detector(debug_batch['pixel_values'].to(device))
+                        print(f"DEBUG MoE output:")
+                        print(f"  Logits shape: {moe_output.logits.shape}")
+                        print(f"  Pred boxes shape: {moe_output.pred_boxes.shape}")
+                        print(f"  Output type: {type(moe_output)}")
+                        print(f"  Has pred_boxes attr: {hasattr(moe_output, 'pred_boxes')}")
+                        
+                        # Compare with expert
+                        print(f"DEBUG Comparison:")
+                        print(f"  Expert has pred_boxes: {hasattr(expert_output, 'pred_boxes')}")
+                        print(f"  MoE has pred_boxes: {hasattr(moe_output, 'pred_boxes')}")
+                        print(f"  Expert output keys: {list(expert_output.keys()) if hasattr(expert_output, 'keys') else 'No keys method'}")
+                        print(f"  MoE output keys: {list(moe_output.keys()) if hasattr(moe_output, 'keys') else 'No keys method'}")
                     
                     # Evaluate MoE
                     try:
