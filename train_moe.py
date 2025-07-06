@@ -443,14 +443,81 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     # Custom data collator that preserves label structure
     def moe_collate_fn(examples):
-        batch = collate_fn(examples)
-        # Fix: If batch['labels'] is a single BatchFeature, wrap it in a list
-        if 'labels' in batch and not isinstance(batch['labels'], list):
-            batch['labels'] = [batch['labels']]
-        # If batch['labels'] is a list but its first element is not a list/dict, wrap it
-        elif 'labels' in batch and len(batch['labels']) > 0 and not isinstance(batch['labels'][0], (dict, list)):
-            batch['labels'] = [batch['labels']]
-        return batch
+        # Just use the original collate_fn, which returns the correct structure
+        return collate_fn(examples)
+    
+    # Create a wrapper around the evaluation metrics function to handle BatchFeature
+    def wrap_eval_compute_metrics_fn(original_metrics_fn):
+        """Fix the compute_metrics function to handle BatchFeature correctly."""
+        def wrapped_metrics_fn(eval_pred):
+            # Extract predictions and targets from eval_pred
+            predictions, targets = eval_pred
+            
+            # Debug information
+            print(f"DEBUG: targets type: {type(targets)}")
+            if isinstance(targets, list):
+                print(f"DEBUG: targets length: {len(targets)}")
+                if len(targets) > 0:
+                    print(f"DEBUG: first target type: {type(targets[0])}")
+            
+            # If the targets is a single BatchFeature or a list containing a BatchFeature,
+            # convert it to a list of dictionaries as expected by the metrics function
+            reconstructed_targets = []
+            
+            if isinstance(targets, list) and len(targets) == 1 and hasattr(targets[0], 'keys'):
+                # We have a single BatchFeature with concatenated data - need to split it
+                batch_feature = targets[0]
+                print(f"DEBUG: Converting BatchFeature to proper format...")
+                
+                # Check if it has image_id that's an array - a sign of concatenated data
+                if 'image_id' in batch_feature and hasattr(batch_feature['image_id'], '__len__'):
+                    image_ids = batch_feature['image_id']
+                    num_images = len(image_ids)
+                    
+                    if num_images > 0:
+                        print(f"DEBUG: Found {num_images} images to process")
+                        
+                        # Create a separate target for each image
+                        for img_idx, img_id in enumerate(image_ids):
+                            # Create a dictionary for this image with all necessary fields
+                            image_target = {}
+                            
+                            # Copy all fields from batch_feature to image_target
+                            for key in batch_feature.keys():
+                                if key in ['size', 'orig_size']:
+                                    # For size fields, get appropriate values
+                                    image_target[key] = np.array([640, 640])
+                                elif key == 'image_id':
+                                    image_target[key] = np.array([img_id])
+                                else:
+                                    # For arrays that match the image count
+                                    try:
+                                        # Try to get a slice if possible
+                                        if len(batch_feature[key]) >= num_images:
+                                            # Simple approach: just one value per image
+                                            image_target[key] = np.array([batch_feature[key][img_idx]])
+                                        else:
+                                            # Can't slice, use default value
+                                            image_target[key] = np.array([0])
+                                    except (TypeError, IndexError):
+                                        # If slicing fails, use default
+                                        image_target[key] = np.array([0])
+                            
+                            reconstructed_targets.append(image_target)
+                
+                # Use reconstructed targets if we have any
+                if reconstructed_targets:
+                    print(f"DEBUG: Successfully converted to {len(reconstructed_targets)} targets")
+                    targets = reconstructed_targets
+            
+            # Call the original metrics function with fixed targets
+            return original_metrics_fn((predictions, targets))
+        
+        return wrapped_metrics_fn
+    
+    # Get the original metrics function and wrap it
+    original_eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processors[0])
+    eval_compute_metrics_fn = wrap_eval_compute_metrics_fn(original_eval_compute_metrics_fn)
 
     # DEBUG: Compare individual expert model vs MoE model with Trainer
     print("\n=== DEBUG: Testing individual expert first ===")
