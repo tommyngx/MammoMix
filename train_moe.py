@@ -206,10 +206,25 @@ class MoETrainer:
     
     def _extract_targets(self, batch):
         """Extract binary targets from batch labels."""
-        return torch.tensor([
-            1.0 if any([l['class_labels'].sum().item() > 0 for l in batch['labels']]) else 0.0 
-            for l in batch['labels']
-        ], dtype=torch.float32).to(self.device)
+        targets = []
+        for labels_list in batch['labels']:
+            # Handle case where labels_list might be a single dict or list of dicts
+            if isinstance(labels_list, dict):
+                # Single label dict
+                has_cancer = labels_list.get('class_labels', torch.tensor([])).sum().item() > 0
+            elif isinstance(labels_list, list) and len(labels_list) > 0:
+                # List of label dicts
+                has_cancer = any([
+                    l.get('class_labels', torch.tensor([])).sum().item() > 0 
+                    for l in labels_list if isinstance(l, dict)
+                ])
+            else:
+                # Empty or invalid labels
+                has_cancer = False
+            
+            targets.append(1.0 if has_cancer else 0.0)
+        
+        return torch.tensor(targets, dtype=torch.float32).to(self.device)
     
     def train_gate_only(self, train_loader, val_loader, epochs=50, lr=1e-3):
         """Train only the gating network while keeping experts frozen."""
@@ -355,6 +370,11 @@ class MoEObjectDetectionModel(nn.Module):
         # Get MoE combined output - this now returns properly structured output
         combined_outputs, final_pred, weights, expert_probs, top_indices = self.moe(pixel_values)
         
+        # If labels are provided (during evaluation), we need to ensure they're properly formatted
+        if labels is not None:
+            # Ensure labels maintain the same structure as expected by evaluation
+            combined_outputs.labels = labels
+        
         # Return the combined outputs directly - they maintain the same structure as individual experts
         return combined_outputs
 
@@ -394,7 +414,7 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     ]
     
     # Create MoE model and load trained weights
-    integrated_moe = IntegratedMoE(models, n_models=len(models))
+    integrated_moe = IntegratedMoE(models, n_models=len(models), top_k=2)
     integrated_moe.load_state_dict(torch.load(model_path, map_location=device))
     integrated_moe.eval()
     
@@ -425,12 +445,36 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
         report_to=[],
     )
     
+    # Custom data collator that preserves label structure
+    def moe_collate_fn(examples):
+        batch = collate_fn(examples)
+        # Ensure labels are in the correct format for evaluation
+        if 'labels' in batch:
+            # Convert labels to the format expected by evaluation
+            formatted_labels = []
+            for labels_list in batch['labels']:
+                if isinstance(labels_list, list) and len(labels_list) > 0:
+                    # Take the first label dict if it's a list
+                    formatted_labels.append(labels_list[0])
+                elif isinstance(labels_list, dict):
+                    # Already in correct format
+                    formatted_labels.append(labels_list)
+                else:
+                    # Create empty label dict for consistency
+                    formatted_labels.append({
+                        'boxes': torch.tensor([]).reshape(0, 4),
+                        'class_labels': torch.tensor([]),
+                        'image_id': torch.tensor(0)
+                    })
+            batch['labels'] = formatted_labels
+        return batch
+    
     trainer = Trainer(
         model=moe_detector,
         args=training_args,
         eval_dataset=test_dataset,
         processing_class=image_processors[0],
-        data_collator=collate_fn,
+        data_collator=moe_collate_fn,
         compute_metrics=eval_compute_metrics_fn,
     )
     
