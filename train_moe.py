@@ -443,68 +443,75 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     # Custom data collator that preserves label structure
     def moe_collate_fn(examples):
-        # The issue is that collate_fn is creating a BatchFeature with concatenated data
-        # but evaluation expects individual image targets
+        # The key insight: we need to return the SAME structure as the working version
+        # Working version returns: targets = [batch1_list, batch2_list, ...]
+        # where each batch_list = [individual_dict1, individual_dict2, ...]
+        
+        # First, get the normal batch from collate_fn
         batch = collate_fn(examples)
         
-        # Convert the BatchFeature labels back to individual dictionaries
+        # The issue is that collate_fn might be creating a single flattened BatchFeature
+        # We need to convert it back to the list-of-lists structure
+        
         if 'labels' in batch and len(batch['labels']) > 0:
-            labels_batch_feature = batch['labels'][0]  # This is the concatenated BatchFeature
+            # Check if we have the flattened structure
+            first_label = batch['labels'][0]
             
-            # Extract individual components
-            if isinstance(labels_batch_feature, dict) and 'image_id' in labels_batch_feature:
-                image_ids = labels_batch_feature['image_id']
-                boxes = labels_batch_feature['boxes']
-                class_labels = labels_batch_feature['class_labels']
-                areas = labels_batch_feature['area']
-                iscrowd = labels_batch_feature['iscrowd']
-                sizes = labels_batch_feature['size']
-                orig_sizes = labels_batch_feature['orig_size']
+            if (isinstance(first_label, dict) and 'image_id' in first_label and 
+                isinstance(first_label['image_id'], (list, tuple, np.ndarray)) and 
+                len(first_label['image_id']) > 1):
                 
-                # Reconstruct individual image labels
+                # We have flattened data - need to reconstruct individual image labels
+                print("DEBUG: Detected flattened labels, reconstructing individual labels...")
+                
+                image_ids = first_label['image_id']
+                boxes = first_label['boxes'] 
+                class_labels = first_label['class_labels']
+                areas = first_label['area']
+                iscrowd = first_label['iscrowd']
+                sizes = first_label['size']
+                orig_sizes = first_label['orig_size']
+                
+                # Reconstruct individual labels
                 individual_labels = []
-                box_idx = 0
+                box_start_idx = 0
                 
                 for img_idx, img_id in enumerate(image_ids):
-                    # Count how many boxes belong to this image
-                    # We need to figure out how many boxes each image has
-                    # For now, let's assume each image has at least one box
-                    # and group consecutive boxes by image_id
+                    # Find how many boxes belong to this image
+                    # Simple approach: assume each image has at least one box
+                    # Take consecutive boxes until we reach the next image
                     
-                    # Find all boxes for this image_id
-                    image_boxes = []
-                    image_class_labels = []
-                    image_areas = []
-                    image_iscrowd = []
+                    if img_idx < len(image_ids) - 1:
+                        # Not the last image - take boxes until next image
+                        next_img_id = image_ids[img_idx + 1]
+                        # For now, assume 1 box per image (may need adjustment)
+                        num_boxes = 1
+                    else:
+                        # Last image - take remaining boxes
+                        num_boxes = len(boxes) - box_start_idx
                     
-                    # Simple approach: each consecutive box until we hit a different image pattern
-                    # Since boxes are concatenated, we need to split them properly
-                    # For now, let's try a simpler approach - distribute boxes evenly
-                    
-                    num_images = len(image_ids)
-                    total_boxes = len(boxes)
-                    
-                    if box_idx < len(boxes):
-                        # Take one box per image for simplicity
-                        # This may need adjustment based on your actual data structure
-                        image_boxes = [boxes[box_idx]]
-                        image_class_labels = [class_labels[box_idx]] if box_idx < len(class_labels) else [0]
-                        image_areas = [areas[box_idx]] if box_idx < len(areas) else [0]
-                        image_iscrowd = [iscrowd[box_idx]] if box_idx < len(iscrowd) else [0]
-                        box_idx += 1
-                    
-                    individual_target = {
-                        'image_id': torch.tensor([img_id]),
-                        'boxes': torch.tensor(image_boxes).reshape(-1, 4),
-                        'class_labels': torch.tensor(image_class_labels),
-                        'area': torch.tensor(image_areas),
-                        'iscrowd': torch.tensor(image_iscrowd),
-                        'size': torch.tensor([sizes[img_idx*2], sizes[img_idx*2+1]]) if img_idx*2+1 < len(sizes) else torch.tensor([640, 640]),
-                        'orig_size': torch.tensor([orig_sizes[img_idx*2], orig_sizes[img_idx*2+1]]) if img_idx*2+1 < len(orig_sizes) else torch.tensor([640, 640])
-                    }
-                    individual_labels.append(individual_target)
+                    # Extract data for this image
+                    if box_start_idx < len(boxes):
+                        image_boxes = boxes[box_start_idx:box_start_idx + num_boxes]
+                        image_class_labels = class_labels[box_start_idx:box_start_idx + num_boxes] if box_start_idx < len(class_labels) else [0]
+                        image_areas = areas[box_start_idx:box_start_idx + num_boxes] if box_start_idx < len(areas) else [0]
+                        image_iscrowd = iscrowd[box_start_idx:box_start_idx + num_boxes] if box_start_idx < len(iscrowd) else [0]
+                        
+                        individual_target = {
+                            'image_id': np.array([img_id]),
+                            'boxes': np.array(image_boxes),
+                            'class_labels': np.array(image_class_labels),
+                            'area': np.array(image_areas), 
+                            'iscrowd': np.array(image_iscrowd),
+                            'size': np.array([640, 640]),  # Standard size
+                            'orig_size': np.array([640, 640])  # Standard size
+                        }
+                        individual_labels.append(individual_target)
+                        box_start_idx += num_boxes
                 
+                # Replace the flattened labels with individual labels
                 batch['labels'] = individual_labels
+                print(f"DEBUG: Reconstructed {len(individual_labels)} individual labels")
         
         return batch
 
