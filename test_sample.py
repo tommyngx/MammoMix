@@ -68,7 +68,14 @@ def test_individual_expert(expert_model_path, test_loader, image_processor, devi
     try:
         # Compute metrics using the same approach as test.py
         predictions = torch.cat(all_predictions, dim=0)
-        eval_pred = (predictions, all_targets)
+        
+        # Create EvalPrediction-like object that evaluation function expects
+        class EvalPrediction:
+            def __init__(self, predictions, label_ids):
+                self.predictions = predictions
+                self.label_ids = label_ids
+        
+        eval_pred = EvalPrediction(predictions, all_targets)
         
         metrics = eval_compute_metrics_fn(eval_pred)
         
@@ -125,7 +132,14 @@ def test_moe_model(moe_model_path, expert_models, test_loader, image_processors,
     try:
         # Compute metrics using the same approach as test.py
         predictions = torch.cat(all_predictions, dim=0)
-        eval_pred = (predictions, all_targets)
+        
+        # Create EvalPrediction-like object that evaluation function expects
+        class EvalPrediction:
+            def __init__(self, predictions, label_ids):
+                self.predictions = predictions
+                self.label_ids = label_ids
+        
+        eval_pred = EvalPrediction(predictions, all_targets)
         
         metrics = eval_compute_metrics_fn(eval_pred)
         
