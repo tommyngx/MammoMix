@@ -365,9 +365,6 @@ if __name__ == "__main__":
     parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
     args = parser.parse_args()
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
-            print(f"{key}: {value:.4f}")
-        else:
-            print(f"{key}: {value}")
     
     # Test MoE model if provided
     moe_results = None
