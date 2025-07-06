@@ -370,13 +370,39 @@ class MoEObjectDetectionModel(nn.Module):
         # Get MoE combined output - this now returns properly structured output
         combined_outputs, final_pred, weights, expert_probs, top_indices = self.moe(pixel_values)
         
-        # If labels are provided (during evaluation), we need to ensure they're properly formatted
-        if labels is not None:
-            # Ensure labels maintain the same structure as expected by evaluation
-            combined_outputs.labels = labels
+        # The issue might be here - we need to preserve the original labels structure
+        # Don't modify the combined_outputs, instead create a new one that maintains labels
+        class ObjectDetectionOutputWithLabels:
+            def __init__(self, logits, pred_boxes=None, labels=None):
+                self.logits = logits
+                self.pred_boxes = pred_boxes
+                self.labels = labels
+                self.loss = torch.tensor(0.0, device=logits.device, requires_grad=False)
+                
+            def __getitem__(self, key):
+                """Make object subscriptable for Trainer compatibility"""
+                if key == 0:
+                    return self.loss
+                elif key == "loss":
+                    return self.loss
+                elif isinstance(key, slice):
+                    if key == slice(1, None, None):  # outputs[1:]
+                        return (self.logits,)
+                    else:
+                        return ()
+                else:
+                    raise KeyError(f"Key {key} not found")
+                    
+            def keys(self):
+                """Return available keys"""
+                return ["loss", "logits", "pred_boxes", "labels"]
         
-        # Return the combined outputs directly - they maintain the same structure as individual experts
-        return combined_outputs
+        # Create new output that preserves labels
+        return ObjectDetectionOutputWithLabels(
+            logits=combined_outputs.logits,
+            pred_boxes=combined_outputs.pred_boxes,
+            labels=labels
+        )
 
 def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None):
     """Test the trained MoE model using evaluation metrics like test.py"""
@@ -504,13 +530,28 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
         
         return batch
     
+    # Let's also create a custom compute_metrics function that adds debugging
+    def debug_compute_metrics(eval_pred):
+        """Debug wrapper around the original compute_metrics function"""
+        print(f"DEBUG compute_metrics: eval_pred type: {type(eval_pred)}")
+        print(f"DEBUG compute_metrics: eval_pred keys: {eval_pred.keys() if hasattr(eval_pred, 'keys') else 'No keys'}")
+        
+        if hasattr(eval_pred, 'label_ids'):
+            print(f"DEBUG compute_metrics: label_ids type: {type(eval_pred.label_ids)}")
+            if eval_pred.label_ids is not None and len(eval_pred.label_ids) > 0:
+                print(f"DEBUG compute_metrics: first label type: {type(eval_pred.label_ids[0])}")
+                print(f"DEBUG compute_metrics: first label content: {eval_pred.label_ids[0]}")
+        
+        # Call the original evaluation function
+        return eval_compute_metrics_fn(eval_pred)
+    
     trainer = Trainer(
         model=moe_detector,
         args=training_args,
         eval_dataset=test_dataset,
         processing_class=image_processors[0],
         data_collator=moe_collate_fn,
-        compute_metrics=eval_compute_metrics_fn,
+        compute_metrics=debug_compute_metrics,
     )
     
     print(f'Test loader: {len(test_dataset)} samples')
