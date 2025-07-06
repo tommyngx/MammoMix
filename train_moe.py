@@ -540,7 +540,50 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
             print(f"DEBUG compute_metrics: label_ids type: {type(eval_pred.label_ids)}")
             if eval_pred.label_ids is not None and len(eval_pred.label_ids) > 0:
                 print(f"DEBUG compute_metrics: first label type: {type(eval_pred.label_ids[0])}")
-                print(f"DEBUG compute_metrics: first label content: {eval_pred.label_ids[0]}")
+                print(f"DEBUG compute_metrics: first label content keys: {eval_pred.label_ids[0].keys() if isinstance(eval_pred.label_ids[0], dict) else 'Not a dict'}")
+                
+                # The issue is that the evaluation expects individual image targets
+                # but we're getting batch-level concatenated data. Let's restructure it.
+                
+                # Check if we have the flattened format and need to restructure
+                if isinstance(eval_pred.label_ids[0], dict) and 'image_id' in eval_pred.label_ids[0]:
+                    first_label = eval_pred.label_ids[0]
+                    if isinstance(first_label['image_id'], (list, tuple, np.ndarray)) and len(first_label['image_id']) > 1:
+                        # We have flattened data - need to restructure to individual images
+                        print("DEBUG: Restructuring flattened labels to individual image targets...")
+                        
+                        # Extract the individual components
+                        image_ids = first_label['image_id']
+                        boxes = first_label['boxes']
+                        class_labels = first_label['class_labels']
+                        areas = first_label['area']
+                        iscrowd = first_label['iscrowd']
+                        sizes = first_label['size'].reshape(-1, 2)  # Reshape to (n_images, 2)
+                        orig_sizes = first_label['orig_size'].reshape(-1, 2)  # Reshape to (n_images, 2)
+                        
+                        # Reconstruct individual image targets
+                        restructured_labels = []
+                        for i, img_id in enumerate(image_ids):
+                            # Each image gets one box (since we have equal number of images and boxes)
+                            individual_target = {
+                                'image_id': torch.tensor([img_id]),
+                                'boxes': torch.tensor([boxes[i]]).reshape(1, 4),
+                                'class_labels': torch.tensor([class_labels[i]]),
+                                'area': torch.tensor([areas[i]]),
+                                'iscrowd': torch.tensor([iscrowd[i]]),
+                                'size': torch.tensor(sizes[i]),
+                                'orig_size': torch.tensor(orig_sizes[i])
+                            }
+                            restructured_labels.append(individual_target)
+                        
+                        # Create a new eval_pred with restructured labels
+                        class RestructuredEvalPred:
+                            def __init__(self, predictions, label_ids):
+                                self.predictions = predictions
+                                self.label_ids = label_ids
+                        
+                        eval_pred = RestructuredEvalPred(eval_pred.predictions, restructured_labels)
+                        print(f"DEBUG: Restructured to {len(restructured_labels)} individual targets")
         
         # Call the original evaluation function
         return eval_compute_metrics_fn(eval_pred)
