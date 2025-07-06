@@ -441,45 +441,21 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
         report_to=[],
     )
     
-    # Custom data collator that preserves label structure
+    # Custom data collator that preserves label structure exactly like test.py
     def moe_collate_fn(examples):
-        # Just use the original collate_fn, which returns the correct structure
+        # Use the original collate_fn without any modifications
         return collate_fn(examples)
 
-    # DEBUG: Compare individual expert model vs MoE model with Trainer
-    print("\n=== DEBUG: Testing individual expert first ===")
-    expert_trainer = Trainer(
-        model=models[0],  # Use first expert model
-        args=TrainingArguments(
-            output_dir=output_dir,
-            per_device_eval_batch_size=8,
-            dataloader_num_workers=2,
-            remove_unused_columns=False,
-            report_to=[],
-        ),
-        eval_dataset=test_dataset,
-        processing_class=image_processors[0],
-        data_collator=moe_collate_fn,
-        compute_metrics=eval_compute_metrics_fn,
-    )
+    # Skip the debug comparison with individual expert - go directly to MoE testing
+    # since both are failing with the same issue
     
-    try:
-        print("Testing individual expert model...")
-        expert_results = expert_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='expert')
-        print(f"Expert model evaluation successful!")
-        print(f"Expert results: {expert_results}")
-    except Exception as e:
-        print(f"Expert model evaluation failed: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    print("\n=== Now testing MoE model ===")
+    print("\n=== Testing MoE model ===")
     trainer = Trainer(
         model=moe_detector,
         args=training_args,
         eval_dataset=test_dataset,
         processing_class=image_processors[0],
-        data_collator=moe_collate_fn,
+        data_collator=collate_fn,  # Use original collate_fn directly
         compute_metrics=eval_compute_metrics_fn,
     )
     
