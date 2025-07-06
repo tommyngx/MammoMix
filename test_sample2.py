@@ -321,32 +321,82 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                             first_pred = eval_pred.predictions[0]
                             print(f"  First prediction type: {type(first_pred)}")
                             print(f"  First prediction length: {len(first_pred) if hasattr(first_pred, '__len__') else 'No length'}")
-                            if hasattr(first_pred, '__len__') and len(first_pred) > 0:
-                                print(f"  First prediction[0] shape: {first_pred[0].shape if hasattr(first_pred[0], 'shape') else 'No shape'}")
                         
-                        # Use the same evaluation function but handle MoE output format
-                        return eval_compute_metrics_fn(eval_pred)
+                        # The MoE model predictions need to be reformatted to match expert format
+                        # Expert format: [(loss, logits, pred_boxes), ...]
+                        # MoE format: [logits, ...]  (missing loss and pred_boxes)
+                        
+                        # We need to reconstruct the predictions to match the expected format
+                        # Since we can't get loss and pred_boxes from the stored predictions,
+                        # we'll have to re-run the model inference
+                        
+                        print("ERROR: MoE predictions format incompatible with evaluation function")
+                        print("Need to re-run MoE model to get full outputs (loss, logits, pred_boxes)")
+                        
+                        # For now, return empty metrics to avoid crash
+                        return {
+                            'map': 0.0,
+                            'map_50': 0.0,
+                            'map_75': 0.0,
+                            'map_small': 0.0,
+                            'map_medium': 0.0,
+                            'map_large': 0.0
+                        }
                     
-                    # Create MoE trainer with custom evaluation function
-                    moe_trainer = Trainer(
-                        model=moe_detector,
-                        args=moe_training_args,
-                        processing_class=image_processor,
-                        data_collator=collate_fn,
-                        compute_metrics=moe_eval_compute_metrics_fn,
-                    )
+                    # Use manual evaluation instead of trainer.evaluate since the format is incompatible
+                    print("WARNING: Using manual evaluation for MoE due to output format incompatibility")
                     
-                    # Evaluate MoE
                     try:
-                        moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
-                        print(f"\n=== MoE Test Results ===")
+                        # Manual evaluation approach
+                        moe_detector.eval()
+                        all_predictions = []
+                        all_targets = []
+                        
+                        manual_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn, shuffle=False)
+                        
+                        with torch.no_grad():
+                            for batch in manual_loader:
+                                pixel_values = batch['pixel_values'].to(device)
+                                labels = batch['labels']
+                                
+                                # Get MoE predictions
+                                outputs = moe_detector(pixel_values)
+                                
+                                # Format as expected by evaluation function: (loss, logits, pred_boxes)
+                                loss = outputs.loss if hasattr(outputs, 'loss') else torch.tensor(0.0)
+                                logits = outputs.logits.cpu().numpy()
+                                pred_boxes = outputs.pred_boxes.cpu().numpy()
+                                
+                                all_predictions.append((None, logits, pred_boxes))
+                                all_targets.extend(labels)
+                        
+                        # Create eval_pred object
+                        from types import SimpleNamespace
+                        eval_pred = SimpleNamespace()
+                        eval_pred.predictions = all_predictions
+                        eval_pred.label_ids = []
+                        
+                        # Group targets by batch
+                        batch_size = 1
+                        for i in range(0, len(all_targets), batch_size):
+                            batch_targets = all_targets[i:i+batch_size]
+                            eval_pred.label_ids.append(batch_targets)
+                        
+                        # Use the original evaluation function
+                        moe_metrics = eval_compute_metrics_fn(eval_pred)
+                        
+                        # Add prefix to metrics
+                        moe_results = {f"moe_{k}": v for k, v in moe_metrics.items()}
+                        
+                        print(f"\n=== MoE Test Results (Manual) ===")
                         for key, value in moe_results.items():
                             if isinstance(value, float):
                                 print(f"{key}: {value:.4f}")
                             else:
                                 print(f"{key}: {value}")
+                                
                     except Exception as e:
-                        print(f"MoE evaluation failed: {e}")
+                        print(f"Manual MoE evaluation failed: {e}")
                         import traceback
                         traceback.print_exc()
                         moe_results = None
