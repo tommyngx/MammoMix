@@ -73,7 +73,7 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8):
+def main(config_path, epoch=None, dataset=None, weight_dir=None):
     config = load_config(config_path)
     DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
@@ -192,28 +192,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8):
         model_type=get_model_type(MODEL_NAME),
         dataset_epoch=epoch
     )
-    
-    # Limit to small sample size for testing
-    if len(test_dataset) > num_samples:
-        indices = list(range(num_samples))
-        test_dataset = torch.utils.data.Subset(test_dataset, indices)
-    
     print(f'Test loader: {len(test_dataset)} samples')
-    
-    # Print individual sample details
-    print(f"\n=== Sample Details ===")
-    for i in range(min(3, len(test_dataset))):  # Show first 3 samples
-        sample = test_dataset[i]
-        labels = sample['labels']
-        print(f"Sample {i}:")
-        print(f"  Image shape: {sample['pixel_values'].shape}")
-        print(f"  Labels type: {type(labels)}")
-        if isinstance(labels, dict):
-            print(f"  Image ID: {labels.get('image_id', 'N/A')}")
-            print(f"  Boxes: {len(labels.get('boxes', []))} boxes")
-            print(f"  Classes: {labels.get('class_labels', [])}")
-        print()
-    
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     print("\n=== Test Results ===")
     for key, value in test_results.items():
@@ -228,6 +207,5 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
-    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
     args = parser.parse_args()
-    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples)
+    main(args.config, args.epoch, args.dataset, args.weight_dir)
