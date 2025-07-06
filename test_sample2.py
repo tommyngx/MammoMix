@@ -335,11 +335,18 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                             else:
                                 last_hidden_state = outputs.last_hidden_state
                             
+                            # Ensure pred_boxes has correct shape [batch_size, num_queries, 4]
+                            pred_boxes = outputs.pred_boxes
+                            if pred_boxes.shape[-1] != 4:
+                                print(f"WARNING: pred_boxes shape {pred_boxes.shape} != expected [..., 4]")
+                                # Reshape or slice to get exactly 4 dimensions
+                                pred_boxes = pred_boxes[..., :4]
+                            
                             # Return YolosObjectDetectionOutput with all required fields
                             return YolosObjectDetectionOutput(
                                 loss=loss,
                                 logits=outputs.logits,
-                                pred_boxes=outputs.pred_boxes,
+                                pred_boxes=pred_boxes,
                                 last_hidden_state=last_hidden_state
                             )
                     
