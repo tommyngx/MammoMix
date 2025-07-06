@@ -312,91 +312,64 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         print(f"  Expert output keys: {list(expert_output.keys()) if hasattr(expert_output, 'keys') else 'No keys method'}")
                         print(f"  MoE output keys: {list(moe_output.keys()) if hasattr(moe_output, 'keys') else 'No keys method'}")
                     
-                    # Create a custom evaluation function for MoE to handle different output format
-                    def moe_eval_compute_metrics_fn(eval_pred):
-                        print(f"DEBUG MoE eval_pred structure:")
-                        print(f"  Predictions type: {type(eval_pred.predictions)}")
-                        print(f"  Predictions length: {len(eval_pred.predictions)}")
-                        if len(eval_pred.predictions) > 0:
-                            first_pred = eval_pred.predictions[0]
-                            print(f"  First prediction type: {type(first_pred)}")
-                            print(f"  First prediction length: {len(first_pred) if hasattr(first_pred, '__len__') else 'No length'}")
-                        
-                        # The MoE model predictions need to be reformatted to match expert format
-                        # Expert format: [(loss, logits, pred_boxes), ...]
-                        # MoE format: [logits, ...]  (missing loss and pred_boxes)
-                        
-                        # We need to reconstruct the predictions to match the expected format
-                        # Since we can't get loss and pred_boxes from the stored predictions,
-                        # we'll have to re-run the model inference
-                        
-                        print("ERROR: MoE predictions format incompatible with evaluation function")
-                        print("Need to re-run MoE model to get full outputs (loss, logits, pred_boxes)")
-                        
-                        # For now, return empty metrics to avoid crash
-                        return {
-                            'map': 0.0,
-                            'map_50': 0.0,
-                            'map_75': 0.0,
-                            'map_small': 0.0,
-                            'map_medium': 0.0,
-                            'map_large': 0.0
-                        }
+                    # Create a wrapper for MoE model that adds missing loss
+                    class MoEModelWithLoss(torch.nn.Module):
+                        def __init__(self, moe_model):
+                            super().__init__()
+                            self.moe_model = moe_model
+                            
+                        def forward(self, pixel_values, labels=None):
+                            outputs = self.moe_model(pixel_values)
+                            
+                            # Add missing loss as 0 if not present
+                            if not hasattr(outputs, 'loss') or outputs.loss is None:
+                                # Create a dummy loss
+                                loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=True)
+                                # Create new output with loss
+                                from types import SimpleNamespace
+                                new_outputs = SimpleNamespace()
+                                new_outputs.loss = loss
+                                new_outputs.logits = outputs.logits
+                                new_outputs.pred_boxes = outputs.pred_boxes
+                                if hasattr(outputs, 'last_hidden_state'):
+                                    new_outputs.last_hidden_state = outputs.last_hidden_state
+                                return new_outputs
+                            
+                            return outputs
                     
-                    # Use manual evaluation instead of trainer.evaluate since the format is incompatible
-                    print("WARNING: Using manual evaluation for MoE due to output format incompatibility")
+                    # Wrap MoE model to ensure it has loss
+                    moe_model_with_loss = MoEModelWithLoss(moe_detector).to(device)
                     
+                    # Test the wrapped model
+                    with torch.no_grad():
+                        test_output = moe_model_with_loss(debug_batch['pixel_values'].to(device))
+                        print(f"DEBUG Wrapped MoE output:")
+                        print(f"  Has loss attr: {hasattr(test_output, 'loss')}")
+                        print(f"  Loss value: {test_output.loss}")
+                        print(f"  Logits shape: {test_output.logits.shape}")
+                        print(f"  Pred boxes shape: {test_output.pred_boxes.shape}")
+                    
+                    # Create MoE trainer with wrapped model
+                    moe_trainer = Trainer(
+                        model=moe_model_with_loss,
+                        args=moe_training_args,
+                        processing_class=image_processor,
+                        data_collator=collate_fn,
+                        compute_metrics=eval_compute_metrics_fn,
+                    )
+                    
+                    # Evaluate MoE using trainer.evaluate
                     try:
-                        # Manual evaluation approach
-                        moe_detector.eval()
-                        all_predictions = []
-                        all_targets = []
-                        
-                        manual_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn, shuffle=False)
-                        
-                        with torch.no_grad():
-                            for batch in manual_loader:
-                                pixel_values = batch['pixel_values'].to(device)
-                                labels = batch['labels']
-                                
-                                # Get MoE predictions
-                                outputs = moe_detector(pixel_values)
-                                
-                                # Format as expected by evaluation function: (loss, logits, pred_boxes)
-                                loss = outputs.loss if hasattr(outputs, 'loss') else torch.tensor(0.0)
-                                logits = outputs.logits.cpu().numpy()
-                                pred_boxes = outputs.pred_boxes.cpu().numpy()
-                                
-                                all_predictions.append((None, logits, pred_boxes))
-                                all_targets.extend(labels)
-                        
-                        # Create eval_pred object
-                        from types import SimpleNamespace
-                        eval_pred = SimpleNamespace()
-                        eval_pred.predictions = all_predictions
-                        eval_pred.label_ids = []
-                        
-                        # Group targets by batch
-                        batch_size = 1
-                        for i in range(0, len(all_targets), batch_size):
-                            batch_targets = all_targets[i:i+batch_size]
-                            eval_pred.label_ids.append(batch_targets)
-                        
-                        # Use the original evaluation function
-                        moe_metrics = eval_compute_metrics_fn(eval_pred)
-                        
-                        # Add prefix to metrics
-                        moe_results = {f"moe_{k}": v for k, v in moe_metrics.items()}
-                        
-                        print(f"\n=== MoE Test Results (Manual) ===")
+                        print("Using trainer.evaluate for MoE...")
+                        moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+                        print(f"\n=== MoE Test Results ===")
                         for key, value in moe_results.items():
                             if isinstance(value, float):
                                 print(f"{key}: {value:.4f}")
                             else:
                                 print(f"{key}: {value}")
-                                
                     except Exception as e:
-                        print(f"Manual MoE evaluation failed: {e}")
+                        print(f"MoE evaluation failed: {e}")
                         import traceback
                         traceback.print_exc()
                         moe_results = None
@@ -437,6 +410,33 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         
         # Calculate improvement
         if expert_results and isinstance(expert_map, float) and isinstance(moe_map, float):
+            improvement = moe_map - expert_map
+            improvement_pct = (improvement / expert_map) * 100 if expert_map != 0 else 0
+            print(f"mAP Improvement: {improvement:.4f} ({improvement_pct:+.2f}%)")
+        
+        if expert_results and isinstance(expert_map_50, float) and isinstance(moe_map_50, float):
+            improvement_50 = moe_map_50 - expert_map_50
+            improvement_50_pct = (improvement_50 / expert_map_50) * 100 if expert_map_50 != 0 else 0
+            print(f"mAP@50 Improvement: {improvement_50:.4f} ({improvement_50_pct:+.2f}%)")
+    else:
+        print("MoE: Not tested or failed")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
+    parser.add_argument('--num_samples', default=8, help='Number of test samples to use (or "all" for full dataset)')
+    parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
+    parser.add_argument('--one_testing', action='store_true', help='Only run single random sample comparison test')
+    args = parser.parse_args()
+    
+    # Convert num_samples to int if it's not "all"
+    if args.num_samples != 'all':
+        args.num_samples = int(args.num_samples)
+    
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model, args.one_testing)
             improvement = moe_map - expert_map
             improvement_pct = (improvement / expert_map) * 100 if expert_map != 0 else 0
             print(f"mAP Improvement: {improvement:.4f} ({improvement_pct:+.2f}%)")
