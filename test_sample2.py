@@ -291,14 +291,6 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         eval_do_concat_batches=False,  # Add this to prevent batch concatenation issues
                     )
                     
-                    moe_trainer = Trainer(
-                        model=moe_detector,
-                        args=moe_training_args,
-                        processing_class=image_processor,
-                        data_collator=collate_fn,
-                        compute_metrics=eval_compute_metrics_fn,
-                    )
-                    
                     # Debug: Test MoE model output format
                     debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
                     debug_batch = next(iter(debug_loader))
@@ -310,6 +302,8 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         print(f"  Pred boxes shape: {moe_output.pred_boxes.shape}")
                         print(f"  Output type: {type(moe_output)}")
                         print(f"  Has pred_boxes attr: {hasattr(moe_output, 'pred_boxes')}")
+                        print(f"  Has loss attr: {hasattr(moe_output, 'loss')}")
+                        print(f"  Has last_hidden_state attr: {hasattr(moe_output, 'last_hidden_state')}")
                         
                         # Compare with expert
                         print(f"DEBUG Comparison:")
@@ -317,6 +311,30 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         print(f"  MoE has pred_boxes: {hasattr(moe_output, 'pred_boxes')}")
                         print(f"  Expert output keys: {list(expert_output.keys()) if hasattr(expert_output, 'keys') else 'No keys method'}")
                         print(f"  MoE output keys: {list(moe_output.keys()) if hasattr(moe_output, 'keys') else 'No keys method'}")
+                    
+                    # Create a custom evaluation function for MoE to handle different output format
+                    def moe_eval_compute_metrics_fn(eval_pred):
+                        print(f"DEBUG MoE eval_pred structure:")
+                        print(f"  Predictions type: {type(eval_pred.predictions)}")
+                        print(f"  Predictions length: {len(eval_pred.predictions)}")
+                        if len(eval_pred.predictions) > 0:
+                            first_pred = eval_pred.predictions[0]
+                            print(f"  First prediction type: {type(first_pred)}")
+                            print(f"  First prediction length: {len(first_pred) if hasattr(first_pred, '__len__') else 'No length'}")
+                            if hasattr(first_pred, '__len__') and len(first_pred) > 0:
+                                print(f"  First prediction[0] shape: {first_pred[0].shape if hasattr(first_pred[0], 'shape') else 'No shape'}")
+                        
+                        # Use the same evaluation function but handle MoE output format
+                        return eval_compute_metrics_fn(eval_pred)
+                    
+                    # Create MoE trainer with custom evaluation function
+                    moe_trainer = Trainer(
+                        model=moe_detector,
+                        args=moe_training_args,
+                        processing_class=image_processor,
+                        data_collator=collate_fn,
+                        compute_metrics=moe_eval_compute_metrics_fn,
+                    )
                     
                     # Evaluate MoE
                     try:
@@ -332,7 +350,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         import traceback
                         traceback.print_exc()
                         moe_results = None
-                    
+
                 else:
                     print("Error: Need at least 2 expert models for MoE")
             else:
