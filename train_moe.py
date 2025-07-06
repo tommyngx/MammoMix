@@ -457,9 +457,15 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
             # Check if we have the flattened structure
             first_label = batch['labels'][0]
             
+            print(f"DEBUG: Checking label structure - type: {type(first_label)}")
+            if hasattr(first_label, 'keys'):
+                print(f"DEBUG: Label keys: {first_label.keys()}")
+            if isinstance(first_label, dict) and 'image_id' in first_label:
+                print(f"DEBUG: image_id type: {type(first_label['image_id'])}, length: {len(first_label['image_id'])}")
+            
+            # Check for flattened structure - single BatchFeature with multiple images
             if (isinstance(first_label, dict) and 'image_id' in first_label and 
-                isinstance(first_label['image_id'], (list, tuple, np.ndarray)) and 
-                len(first_label['image_id']) > 1):
+                hasattr(first_label['image_id'], '__len__') and len(first_label['image_id']) > 1):
                 
                 # We have flattened data - need to reconstruct individual image labels
                 print("DEBUG: Detected flattened labels, reconstructing individual labels...")
@@ -472,34 +478,32 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
                 sizes = first_label['size']
                 orig_sizes = first_label['orig_size']
                 
+                print(f"DEBUG: Found {len(image_ids)} images with {len(boxes)} total boxes")
+                
                 # Reconstruct individual labels
                 individual_labels = []
-                box_start_idx = 0
                 
+                # Map each box to its corresponding image
+                # For simplicity, assume boxes are ordered by image_id
+                box_idx = 0
                 for img_idx, img_id in enumerate(image_ids):
-                    # Find how many boxes belong to this image
-                    # Simple approach: assume each image has at least one box
-                    # Take consecutive boxes until we reach the next image
+                    # For this approach, let's assume each image has at least one box
+                    # and distribute boxes based on the number of images vs boxes
+                    boxes_per_image = len(boxes) // len(image_ids)
+                    if img_idx < len(boxes) % len(image_ids):
+                        boxes_per_image += 1
                     
-                    if img_idx < len(image_ids) - 1:
-                        # Not the last image - take boxes until next image
-                        next_img_id = image_ids[img_idx + 1]
-                        # For now, assume 1 box per image (may need adjustment)
-                        num_boxes = 1
-                    else:
-                        # Last image - take remaining boxes
-                        num_boxes = len(boxes) - box_start_idx
-                    
-                    # Extract data for this image
-                    if box_start_idx < len(boxes):
-                        image_boxes = boxes[box_start_idx:box_start_idx + num_boxes]
-                        image_class_labels = class_labels[box_start_idx:box_start_idx + num_boxes] if box_start_idx < len(class_labels) else [0]
-                        image_areas = areas[box_start_idx:box_start_idx + num_boxes] if box_start_idx < len(areas) else [0]
-                        image_iscrowd = iscrowd[box_start_idx:box_start_idx + num_boxes] if box_start_idx < len(iscrowd) else [0]
+                    if box_idx < len(boxes):
+                        # Take boxes for this image
+                        end_idx = min(box_idx + boxes_per_image, len(boxes))
+                        image_boxes = boxes[box_idx:end_idx] if end_idx > box_idx else [boxes[box_idx]]
+                        image_class_labels = class_labels[box_idx:end_idx] if end_idx > box_idx and box_idx < len(class_labels) else [0]
+                        image_areas = areas[box_idx:end_idx] if end_idx > box_idx and box_idx < len(areas) else [0]
+                        image_iscrowd = iscrowd[box_idx:end_idx] if end_idx > box_idx and box_idx < len(iscrowd) else [0]
                         
                         individual_target = {
                             'image_id': np.array([img_id]),
-                            'boxes': np.array(image_boxes),
+                            'boxes': np.array(image_boxes) if len(image_boxes) > 0 else np.array([]).reshape(0, 4),
                             'class_labels': np.array(image_class_labels),
                             'area': np.array(image_areas), 
                             'iscrowd': np.array(image_iscrowd),
@@ -507,11 +511,19 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
                             'orig_size': np.array([640, 640])  # Standard size
                         }
                         individual_labels.append(individual_target)
-                        box_start_idx += num_boxes
+                        box_idx = end_idx
                 
                 # Replace the flattened labels with individual labels
                 batch['labels'] = individual_labels
                 print(f"DEBUG: Reconstructed {len(individual_labels)} individual labels")
+            
+            elif len(batch['labels']) == 1 and isinstance(first_label, dict):
+                # Single flattened BatchFeature - this is the problematic case
+                print("DEBUG: Single BatchFeature detected, this should not reach evaluation")
+                # For now, just return as-is to see what happens
+                pass
+            else:
+                print(f"DEBUG: Labels already in correct format - {len(batch['labels'])} items")
         
         return batch
 
