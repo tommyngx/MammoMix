@@ -248,11 +248,6 @@ def main():
         print(f"MoE mAP: {moe_map}")
     else:
         print("MoE: Failed/Not Found")
-
-if __name__ == "__main__":
-    main()
-        dataset_epoch=args.epoch
-    )
     
     # Limit the dataset to specified number of samples
     if len(test_dataset) > args.num_samples:
