@@ -77,11 +77,16 @@ def load_config(config_path):
 def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     """Test MoE model and print sample outputs"""
     
+    print(f"DEBUG: Starting MoE model testing...")
+    print(f"DEBUG: MoE model path: {moe_model_path}")
+    print(f"DEBUG: Expert directory: {expert_dir}")
+    
     # Load all expert models for MoE
     expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
     expert_paths = [os.path.join(expert_dir, name) for name in expert_names]
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"DEBUG: Using device: {device}")
     
     # Load expert models
     models = []
@@ -89,28 +94,64 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     
     for path in expert_paths:
         if os.path.exists(path):
+            print(f"DEBUG: Loading expert from {path}")
             processor = AutoImageProcessor.from_pretrained(path)
             model = get_yolos_model(path, processor, 'yolos').to(device)
             models.append(model)
             image_processors.append(processor)
             print(f"Loaded expert: {os.path.basename(path)}")
+        else:
+            print(f"DEBUG: Expert path not found: {path}")
     
     if not models:
         print("No expert models found for MoE!")
         return None
     
+    print(f"DEBUG: Total experts loaded: {len(models)}")
+    
     # Create MoE model
+    print(f"DEBUG: Creating IntegratedMoE...")
     integrated_moe = IntegratedMoE(models, n_models=len(models), top_k=2)
+    
+    print(f"DEBUG: Loading MoE state dict...")
     integrated_moe.load_state_dict(torch.load(moe_model_path, map_location=device))
     integrated_moe.eval()
+    print(f"DEBUG: MoE model loaded and set to eval mode")
     
     # Wrap for compatibility
+    print(f"DEBUG: Wrapping MoE for object detection...")
     moe_detector = MoEObjectDetectionModel(integrated_moe)
     
     # Setup evaluation
+    print(f"DEBUG: Setting up evaluation function...")
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
     
+    # Test with a single sample first
+    print(f"DEBUG: Testing with single sample...")
+    try:
+        sample = test_dataset[0]
+        print(f"DEBUG: Sample keys: {sample.keys()}")
+        print(f"DEBUG: Sample pixel_values shape: {sample['pixel_values'].shape}")
+        print(f"DEBUG: Sample labels type: {type(sample['labels'])}")
+        
+        # Test MoE forward pass
+        pixel_values = sample['pixel_values'].unsqueeze(0).to(device)
+        print(f"DEBUG: Input shape: {pixel_values.shape}")
+        
+        with torch.no_grad():
+            output = moe_detector(pixel_values)
+            print(f"DEBUG: MoE output type: {type(output)}")
+            print(f"DEBUG: MoE output has logits: {hasattr(output, 'logits')}")
+            if hasattr(output, 'logits'):
+                print(f"DEBUG: MoE logits shape: {output.logits.shape}")
+    except Exception as e:
+        print(f"DEBUG: Single sample test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+    
     # Create trainer
+    print(f"DEBUG: Creating trainer...")
     training_args = TrainingArguments(
         output_dir='./temp_output',
         per_device_eval_batch_size=4,
@@ -127,17 +168,26 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
         compute_metrics=eval_compute_metrics_fn,
     )
     
+    print(f"DEBUG: Starting trainer evaluation...")
     print(f"\n=== Testing MoE Model ===")
-    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
     
-    print("\n=== MoE Test Results ===")
-    for key, value in test_results.items():
-        if isinstance(value, float):
-            print(f"{key}: {value:.4f}")
-        else:
-            print(f"{key}: {value}")
+    try:
+        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+        
+        print("\n=== MoE Test Results ===")
+        for key, value in test_results.items():
+            if isinstance(value, float):
+                print(f"{key}: {value:.4f}")
+            else:
+                print(f"{key}: {value}")
+        
+        return test_results
     
-    return test_results
+    except Exception as e:
+        print(f"DEBUG: Trainer evaluation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, moe_model=None):
     config = load_config(config_path)
