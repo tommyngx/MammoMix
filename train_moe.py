@@ -97,7 +97,10 @@ class IntegratedMoE(nn.Module):
         for expert in self.experts:
             with torch.no_grad():
                 outputs = expert(pixel_values)
-                probs = torch.sigmoid(outputs.logits[..., 0])
+                # Fix: Get proper probability shape (batch_size,)
+                logits = outputs.logits  # Shape: (batch_size, num_queries, num_classes)
+                # Take mean across queries, then sigmoid for binary classification
+                probs = torch.sigmoid(logits[..., 0].mean(dim=1))  # Shape: (batch_size,)
                 expert_probs.append(probs)
         
         # Stack expert predictions: (batch_size, n_models)
