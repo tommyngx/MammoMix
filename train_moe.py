@@ -4,40 +4,13 @@ import pickle
 import datetime
 from pathlib import Path
 
-# Suppress TensorFlow and CUDA warnings - Enhanced
+# Suppress TensorFlow and CUDA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/local/cuda"
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
 os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
-os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
-os.environ['ABSL_LOG_LEVEL'] = '3'
-os.environ["GRPC_VERBOSITY"] = "ERROR"
-os.environ["GLOG_minloglevel"] = "2"
-
-# More aggressive warning suppression
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
-# Apply to all warning sources
-import sys
-import logging
-logging.getLogger().setLevel(logging.ERROR)
-
-# Completely suppress stderr during imports if needed
-class CompleteDevNull:
-    def write(self, msg):
-        pass
-    def flush(self):
-        pass
-
-# Use complete suppression during sensitive imports
-original_stderr = sys.stderr
-sys.stderr = CompleteDevNull()
 
 import numpy as np
 import yaml
@@ -58,9 +31,6 @@ from transformers import (
 
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
-
-# Restore stderr after imports
-sys.stderr = original_stderr
 
 # ================================
 # CONFIGURATION & UTILITIES
