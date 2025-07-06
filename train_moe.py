@@ -313,7 +313,8 @@ class MoEObjectDetectionModel(nn.Module):
         class ObjectDetectionOutput:
             def __init__(self, logits):
                 self.logits = logits
-                self.loss = None  # Add loss attribute for compatibility
+                # Create a dummy loss tensor to avoid NoneType error
+                self.loss = torch.tensor(0.0, device=logits.device, requires_grad=False)
                 
             def __getitem__(self, key):
                 """Make object subscriptable for Trainer compatibility"""
