@@ -452,35 +452,6 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         print(f"Expert pred_boxes shape: {expert_output.pred_boxes.shape}")
         print(f"Expert logits sample (first 3 queries):")
         print(expert_output.logits[0, :3, :])
-    
-    # Random sample comparison between Expert, MoE and Ground Truth
-    print(f"\n=== Random Sample Comparison ===")
-    import random
-    random_idx = random.randint(0, len(test_dataset) - 1)
-    random_sample = test_dataset[random_idx]
-    
-    print(f"Random sample index: {random_idx}")
-    print(f"Ground truth:")
-    gt_labels = random_sample['labels']
-    if isinstance(gt_labels, dict):
-        print(f"  Image ID: {gt_labels.get('image_id', 'N/A')}")
-        gt_boxes = gt_labels.get('boxes', [])
-        print(f"  GT Boxes: {gt_boxes}")
-        print(f"  GT Classes: {gt_labels.get('class_labels', [])}")
-    
-    # Get predictions from expert
-    pixel_values_single = random_sample['pixel_values'].unsqueeze(0).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-    
-    with torch.no_grad():
-        expert_pred = model(pixel_values_single)
-        print(f"\nExpert predictions:")
-        print(f"  Logits shape: {expert_pred.logits.shape}")
-        print(f"  Top 3 predictions (confidence scores):")
-        expert_probs = torch.softmax(expert_pred.logits[0], dim=-1)
-        top_expert = torch.topk(expert_probs[:, 1], 3)  # Get top 3 for class 1 (cancer)
-        for i, (score, idx) in enumerate(zip(top_expert.values, top_expert.indices)):
-            print(f"    Query {idx}: {score:.4f}")
-        print(f"  Pred boxes (top 3): {expert_pred.pred_boxes[0, top_expert.indices[:3], :]}")
         
     # Test MoE model if provided
     moe_results = None
@@ -488,16 +459,45 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         if weight_dir:
             expert_dir = os.path.dirname(weight_dir)  # Parent directory containing all experts
             try:
-                # First get MoE prediction for the same sample
-                print(f"\nMoE predictions for same sample:")
-                
-                # Load MoE components quickly for single prediction
-                expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
-                expert_paths = [os.path.join(expert_dir, name) for name in expert_names if os.path.exists(os.path.join(expert_dir, name))]
-                
-                if expert_paths:
-                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                    models = []
+                # Run full MoE evaluation
+                moe_results = test_moe_model(moe_model, expert_dir, test_dataset, image_processor)
+            except Exception as e:
+                print(f"MoE testing failed: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("Warning: weight_dir required for MoE testing (to find expert models)")
+    elif moe_model:
+        print(f"MoE model not found: {moe_model}")
+    
+    # Summary comparison
+    print(f"\n=== Summary Comparison ===")
+    if test_results:
+        expert_map = test_results.get('test_map', 'N/A')
+        print(f"Expert ({DATASET_NAME}) mAP: {expert_map}")
+    
+    if moe_results:
+        moe_map = moe_results.get('moe_map', 'N/A')
+        print(f"MoE (all experts) mAP: {moe_map}")
+    else:
+        print("MoE: Not tested or failed")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
+    parser.add_argument('--num_samples', default=8, help='Number of test samples to use (or "all" for full dataset)')
+    parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
+    parser.add_argument('--one_test', action='store_true', help='Only run single sample comparison test')
+    args = parser.parse_args()
+    
+    # Convert num_samples to int if it's not "all"
+    if args.num_samples != 'all':
+        args.num_samples = int(args.num_samples)
+    
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model, args.one_test)
                     for path in expert_paths[:2]:  # Just load 2 for quick test
                         processor = AutoImageProcessor.from_pretrained(path)
                         expert_model = get_yolos_model(path, processor, 'yolos').to(device)
