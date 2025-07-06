@@ -1,5 +1,8 @@
 import argparse
 import os
+import pickle
+import datetime
+from pathlib import Path
 
 # Suppress TensorFlow and CUDA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -9,41 +12,38 @@ os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
 os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
 
-import pickle
 import numpy as np
-import albumentations as A
-import xml.etree.ElementTree as ET
 import yaml
-from PIL import Image
-from functools import partial
-from dataclasses import dataclass
-from sklearn.linear_model import LogisticRegression
-from sklearn.base import BaseEstimator, ClassifierMixin
-
-from pathlib import Path
-import datetime
 from tqdm.auto import tqdm
 
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision.ops import box_iou
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.base import BaseEstimator, ClassifierMixin
+
 from transformers import (
     AutoImageProcessor,
     AutoModelForObjectDetection,
-    TrainingArguments,
-    Trainer,
 )
 
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
-from evaluation import get_eval_compute_metrics_fn
+
+# ================================
+# CONFIGURATION & UTILITIES
+# ================================
 
 def load_config(config_path):
+    """Load YAML configuration file."""
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
 
 def get_yolos_model(model_name, image_processor, model_type):
+    """Load a YOLOS model for object detection."""
     model = AutoModelForObjectDetection.from_pretrained(
         model_name,
         id2label={0: 'cancer'},
@@ -53,43 +53,156 @@ def get_yolos_model(model_name, image_processor, model_type):
     )
     return model
 
-def MoE_architecture(models, image_processors, data_loader):
+# ================================
+# MOE COMPONENTS
+# ================================
+
+class GatingNetwork(nn.Module):
     """
-    Extract features from multiple YOLOS models and prepare targets for MoE calibration.
-    Returns:
-        X: np.ndarray, stacked model outputs for all batches
-        y: np.ndarray, binary targets for all batches
+    Gating network that learns to select the best expert for each input.
+    Takes model predictions as input and outputs expert weights.
     """
-    all_outputs = []
-    all_targets = []
-    for batch in tqdm(data_loader, desc="MoE feature extraction"):
-        batch_outputs = []
-        for model, processor in zip(models, image_processors):
+    def __init__(self, n_models=3, hidden_dim=16):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(n_models, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, n_models),
+            nn.Softmax(dim=-1)
+        )
+
+    def forward(self, expert_probs):
+        """Forward pass through gating network."""
+        return self.gate(expert_probs)
+
+class IntegratedMoE(nn.Module):
+    """
+    Integrated MoE model that contains all expert models and gating network.
+    During training, only the gating network is trained while experts are frozen.
+    """
+    def __init__(self, expert_models, n_models=3, hidden_dim=16):
+        super().__init__()
+        self.experts = nn.ModuleList(expert_models)
+        self.gate = GatingNetwork(n_models, hidden_dim)
+        
+        # Freeze expert models
+        for expert in self.experts:
+            for param in expert.parameters():
+                param.requires_grad = False
+    
+    def forward(self, pixel_values):
+        """Forward pass through integrated MoE."""
+        # Get predictions from all experts
+        expert_probs = []
+        for expert in self.experts:
             with torch.no_grad():
-                inputs = batch['pixel_values'].to(model.device)
-                outputs = model(inputs)
-                batch_outputs.append(outputs.logits.cpu().numpy())
-        # Stack outputs from all models
-        batch_outputs = np.concatenate(batch_outputs, axis=-1)  # shape: (batch, ..., n_models*logit_dim)
-        all_outputs.append(batch_outputs)
-        # Assume binary label for MoE calibration (adjust as needed)
-        batch_targets = [1 if any([l['class_labels'].sum().item() > 0 for l in batch['labels']]) else 0 for l in batch['labels']]
-        all_targets.extend(batch_targets)
-    X = np.concatenate(all_outputs, axis=0)
-    y = np.array(all_targets)
-    return X, y
+                outputs = expert(pixel_values)
+                probs = torch.sigmoid(outputs.logits[..., 0])
+                expert_probs.append(probs)
+        
+        # Stack expert predictions: (batch_size, n_models)
+        expert_probs = torch.stack(expert_probs, dim=1)
+        
+        # Get gating weights
+        weights = self.gate(expert_probs)
+        
+        # Compute weighted prediction
+        final_pred = torch.sum(weights * expert_probs, dim=1)
+        
+        return final_pred, weights, expert_probs
+
+# ================================
+# TRAINING UTILITIES
+# ================================
+
+class MoETrainer:
+    """Trainer for the integrated MoE model."""
+    
+    def __init__(self, integrated_moe, device):
+        self.model = integrated_moe
+        self.device = device
+        self.model.to(device)
+    
+    def _extract_targets(self, batch):
+        """Extract binary targets from batch labels."""
+        return torch.tensor([
+            1.0 if any([l['class_labels'].sum().item() > 0 for l in batch['labels']]) else 0.0 
+            for l in batch['labels']
+        ], dtype=torch.float32).to(self.device)
+    
+    def train_gate_only(self, train_loader, val_loader, epochs=50, lr=1e-3):
+        """Train only the gating network while keeping experts frozen."""
+        optimizer = torch.optim.Adam(self.model.gate.parameters(), lr=lr)
+        criterion = nn.BCELoss()
+        
+        best_val_acc = 0.0
+        
+        for epoch in range(epochs):
+            # Training phase
+            self.model.train()
+            total_loss = 0
+            num_batches = 0
+            
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
+                optimizer.zero_grad()
+                
+                pixel_values = batch['pixel_values'].to(self.device)
+                targets = self._extract_targets(batch)
+                
+                final_pred, weights, expert_probs = self.model(pixel_values)
+                loss = criterion(final_pred, targets)
+                
+                loss.backward()
+                optimizer.step()
+                
+                total_loss += loss.item()
+                num_batches += 1
+            
+            avg_train_loss = total_loss / num_batches
+            
+            # Validation phase
+            if (epoch + 1) % 10 == 0 or epoch == 0:
+                val_acc = self.evaluate(val_loader)
+                
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    torch.save(self.model.state_dict(), "integrated_moe_best.pth")
+                
+                print(f"Epoch {epoch+1}/{epochs} - Train loss: {avg_train_loss:.4f} - Val acc: {val_acc:.4f}")
+        
+        return best_val_acc
+    
+    def evaluate(self, data_loader):
+        """Evaluate the model on given data loader."""
+        self.model.eval()
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for batch in data_loader:
+                pixel_values = batch['pixel_values'].to(self.device)
+                targets = self._extract_targets(batch)
+                
+                final_pred, _, _ = self.model(pixel_values)
+                predicted = (final_pred > 0.5).float()
+                
+                total += targets.size(0)
+                correct += (predicted == targets).sum().item()
+        
+        return correct / total
+
+# ================================
+# LEGACY APPROACHES (for reference)
+# ================================
 
 class TopKMoE(BaseEstimator, ClassifierMixin):
-    """
-    Calibrated Mixture of Experts: For each sample, select top-k model predictions (by confidence)
-    and use only those for the final logistic regression.
-    """
+    """Calibrated Mixture of Experts: select top-k model predictions."""
+    
     def __init__(self, k=2):
         self.k = k
         self.lr = LogisticRegression(max_iter=1000)
 
     def fit(self, X, y):
-        # X: shape (n_samples, n_models)
         X_topk = self._select_topk(X)
         self.lr.fit(X_topk, y)
         return self
@@ -103,21 +216,19 @@ class TopKMoE(BaseEstimator, ClassifierMixin):
         return self.lr.predict(X_topk)
 
     def _select_topk(self, X):
-        # X: (n_samples, n_models)
-        # For each sample, select top-k values (by confidence)
-        idx = np.argsort(-X, axis=1)[:, :self.k]  # indices of top-k
+        idx = np.argsort(-X, axis=1)[:, :self.k]
         X_topk = np.take_along_axis(X, idx, axis=1)
         return X_topk
 
+# ================================
+# DATA PROCESSING
+# ================================
+
 def get_model_probs(models, image_processors, data_loader):
-    """
-    For each batch, get the predicted probability (sigmoid) from each model.
-    Returns:
-        probs: np.ndarray, shape (num_samples, n_models)
-        targets: np.ndarray, shape (num_samples,)
-    """
+    """Extract predicted probabilities from multiple models."""
     all_probs = []
     all_targets = []
+    
     for batch in tqdm(data_loader, desc="MoE feature extraction"):
         batch_probs = []
         for model, processor in zip(models, image_processors):
@@ -125,48 +236,62 @@ def get_model_probs(models, image_processors, data_loader):
                 inputs = batch['pixel_values'].to(model.device)
                 outputs = model(inputs)
                 logits = outputs.logits
-                # For binary classification, take sigmoid of first logit
                 probs = torch.sigmoid(logits[..., 0]).cpu().numpy()
                 batch_probs.append(probs)
-        # shape: (n_models, batch_size)
-        batch_probs = np.stack(batch_probs, axis=-1)  # (batch_size, n_models)
+        
+        batch_probs = np.stack(batch_probs, axis=-1)
         all_probs.append(batch_probs)
-        # Assume binary label for MoE calibration (adjust as needed)
-        batch_targets = [1 if any([l['class_labels'].sum().item() > 0 for l in batch['labels']]) else 0 for l in batch['labels']]
+        
+        batch_targets = [
+            1 if any([l['class_labels'].sum().item() > 0 for l in batch['labels']]) else 0 
+            for l in batch['labels']
+        ]
         all_targets.extend(batch_targets)
+    
     X = np.concatenate(all_probs, axis=0)
     y = np.array(all_targets)
     return X, y
 
+# ================================
+# MAIN TRAINING PIPELINE
+# ================================
+
 def main(config_path, epoch=None, dataset=None, weight_dir=None):
+    """Main training pipeline for MoE model."""
+    # Load configuration
     config = load_config(config_path)
     DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
 
-    # Get model subfolders from weight_dir
+    # Setup model paths
     if weight_dir is not None:
-        yolos_models = []
-        for sub in ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM']:
-            yolos_models.append(os.path.join(weight_dir, sub))
+        yolos_models = [
+            os.path.join(weight_dir, sub) 
+            for sub in ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM']
+        ]
+        image_processors = [AutoImageProcessor.from_pretrained(m) for m in yolos_models]
     else:
         yolos_models = [
             config.get('moe', {}).get('model1', 'hustvl/yolos-base'),
             config.get('moe', {}).get('model2', 'hustvl/yolos-small'),
             config.get('moe', {}).get('model3', 'hustvl/yolos-tiny'),
         ]
+        image_processors = [get_image_processor(m, MAX_SIZE) for m in yolos_models]
+    
+    # Setup model types
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base') 
+    model_types = [get_model_type(MODEL_NAME) for _ in yolos_models]
+    
+    # Load expert models
+    print("Loading expert models...")
+    models = [
+        get_yolos_model(m, ip, mt) 
+        for m, ip, mt in zip(yolos_models, image_processors, model_types)
+    ]
 
-    # Add wandb folder support
-    wandb_dir = None
-    if 'wandb' in config and 'wandb_dir' in config['wandb']:
-        wandb_dir = config['wandb']['wandb_dir']
-        print(f"Wandb directory: {wandb_dir}")
-
-    # Use the same processor for all models (or load separately if needed)
-    image_processors = [get_image_processor(m, MAX_SIZE) for m in yolos_models]
-    model_types = [get_model_type(m) for m in yolos_models]
-    models = [get_yolos_model(m, ip, mt) for m, ip, mt in zip(yolos_models, image_processors, model_types)]
-
+    # Setup datasets
+    print("Setting up datasets...")
     train_dataset = BreastCancerDataset(
         split='train',
         splits_dir=SPLITS_DIR,
@@ -184,68 +309,50 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
         dataset_epoch=epoch
     )
 
+    # Setup data loaders
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=32,
-        num_workers=2,
-        pin_memory=True,
-        shuffle=True,
-        collate_fn=collate_fn
+        train_dataset, batch_size=32, num_workers=2, 
+        pin_memory=True, shuffle=True, collate_fn=collate_fn
     )
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=32,
-        num_workers=2,
-        pin_memory=True,
-        shuffle=False,
-        collate_fn=collate_fn
+        val_dataset, batch_size=32, num_workers=2, 
+        pin_memory=True, shuffle=False, collate_fn=collate_fn
     )
 
-    print(f'Train loader: {len(train_dataset)} samples')
-    print(f'Val loader: {len(val_dataset)} samples')
-    print(f"Train loader batches: {len(train_loader)}")
-
-    # Get model probabilities for train set
-    print("Extracting YOLOS model probabilities for MoE training...")
-    X_train, y_train = get_model_probs(models, image_processors, train_loader)
-    print("Extracting YOLOS model probabilities for MoE validation...")
-    X_val, y_val = get_model_probs(models, image_processors, val_loader)
-
-    # Train calibrated MoE with top-2 expert selection
-    print("Training calibrated MoE (Top-2 LogisticRegression)...")
-    moe_model = TopKMoE(k=2)
-    moe_model.fit(X_train, y_train)
-
-    # Save the calibrated MoE model
-    with open("moe_calibrator_top2.pkl", "wb") as f:
-        pickle.dump(moe_model, f)
-    print("MoE calibration model (top-2) saved as moe_calibrator_top2.pkl")
-
-    # Evaluate on validation set using MoE
-    print("Evaluating MoE on validation set...")
-    val_probs = moe_model.predict_proba(X_val)[:, 1]
-    val_preds = (val_probs > 0.5).astype(int)
-    acc = (val_preds == y_val).mean()
-    print(f"MoE (top-2) validation accuracy: {acc:.4f}")
-
-# To train the MoE model, run this script from the terminal:
-# Example:
-# python train_moe.py --config configs/train_config.yaml --weight_dir /path/to/weights
-
-# Arguments:
-# --config: Path to your config YAML file.
-# --weight_dir: Path to directory containing yolos_CSAW, yolos_DMID, yolos_DDSM subfolders.
-# --epoch: (optional) Dataset epoch value to pass to dataset.
-# --dataset: (optional) Dataset name to use (overrides config).
-
-# Example command:
-# python train_moe.py --config configs/train_config.yaml --weight_dir ./weights
+    print(f'Train samples: {len(train_dataset)}')
+    print(f'Val samples: {len(val_dataset)}')
+    print(f'Train batches: {len(train_loader)}')
+    
+    # Setup device and move models
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    for i, model in enumerate(models):
+        models[i] = model.to(device)
+    
+    # Create and train integrated MoE
+    print("Creating integrated MoE model...")
+    integrated_moe = IntegratedMoE(models, n_models=len(models))
+    moe_trainer = MoETrainer(integrated_moe, device)
+    
+    print("Training integrated MoE (gating network only)...")
+    best_acc = moe_trainer.train_gate_only(train_loader, val_loader, epochs=50)
+    
+    # Save final model
+    torch.save(integrated_moe.state_dict(), "integrated_moe_final.pth")
+    print(f"Training completed! Best validation accuracy: {best_acc:.4f}")
+    print("Models saved: integrated_moe_best.pth, integrated_moe_final.pth")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
-    parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
-    parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
-    parser.add_argument('--weight_dir', type=str, default=None, help='Path to directory containing yolos_CSAW, yolos_DMID, yolos_DDSM subfolders')
+    parser = argparse.ArgumentParser(description="Train MoE model with gating network")
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', 
+                       help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, 
+                       help='Dataset epoch value to pass to dataset')
+    parser.add_argument('--dataset', type=str, default=None, 
+                       help='Dataset name to use (overrides config)')
+    parser.add_argument('--weight_dir', type=str, default=None, 
+                       help='Path to directory containing yolos_CSAW, yolos_DMID, yolos_DDSM subfolders')
+    
     args = parser.parse_args()
     main(args.config, args.epoch, args.dataset, args.weight_dir)
