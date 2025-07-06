@@ -266,6 +266,10 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
     DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
+    
+    # Fix: Get epochs from argument -> config -> default (in that order)
+    training_cfg = config.get('training', {})
+    EPOCHS = epoch if epoch is not None else training_cfg.get('epochs', 50)
 
     # Setup model paths
     if weight_dir is not None:
@@ -339,7 +343,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
     moe_trainer = MoETrainer(integrated_moe, device)
     
     print("Training integrated MoE (gating network only)...")
-    best_acc = moe_trainer.train_gate_only(train_loader, val_loader, epochs=50)
+    best_acc = moe_trainer.train_gate_only(train_loader, val_loader, epochs=EPOCHS)
     
     # Save final model
     torch.save(integrated_moe.state_dict(), "integrated_moe_final.pth")
