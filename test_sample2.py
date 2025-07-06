@@ -270,7 +270,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                     # Create MoE trainer with same settings
                     moe_training_args = TrainingArguments(
                         output_dir='./temp_output',
-                        per_device_eval_batch_size=per_device_eval_batch_size,
+                        per_device_eval_batch_size=1,  # Use batch size 1 for MoE to avoid target size mismatch
                         dataloader_num_workers=0,
                         remove_unused_columns=False,
                         report_to=[],
