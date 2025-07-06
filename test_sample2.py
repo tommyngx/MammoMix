@@ -189,8 +189,139 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         
         return  # Exit early, skip all other tests
     
-    # Normal testing flow (copied from original test_sample.py)
-    print("Normal testing mode - use original test_sample.py functionality")
+    # Normal testing flow - full dataset evaluation
+    print(f"\n=== Full Dataset Evaluation Mode ===")
+    print(f"Dataset: {DATASET_NAME}")
+    print(f"Total test samples: {len(test_dataset)}")
+    
+    # Limit dataset if num_samples is specified
+    if num_samples != 'all' and len(test_dataset) > num_samples:
+        indices = list(range(num_samples))
+        test_dataset = torch.utils.data.Subset(test_dataset, indices)
+        print(f"Limited to: {len(test_dataset)} samples")
+    else:
+        print(f"Using all {len(test_dataset)} samples")
+    
+    # Setup trainer for expert evaluation
+    training_cfg = config.get('training', {})
+    per_device_eval_batch_size = training_cfg.get('batch_size', 8)
+    
+    training_args = TrainingArguments(
+        output_dir='./temp_output',
+        per_device_eval_batch_size=per_device_eval_batch_size,
+        dataloader_num_workers=0,
+        remove_unused_columns=False,
+        report_to=[],
+        fp16=torch.cuda.is_available(),
+    )
+    
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    expert_trainer = Trainer(
+        model=model,
+        args=training_args,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    # Evaluate expert
+    print(f"\n=== Testing Expert ({DATASET_NAME}) ===")
+    expert_results = expert_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='expert')
+    print(f"\n=== Expert ({DATASET_NAME}) Test Results ===")
+    for key, value in expert_results.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+    
+    # Test MoE model if provided
+    moe_results = None
+    if moe_model and os.path.exists(moe_model) and weight_dir:
+        try:
+            print(f"\n=== Testing MoE Model ===")
+            expert_dir = os.path.dirname(weight_dir)
+            expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
+            expert_paths = [os.path.join(expert_dir, name) for name in expert_names if os.path.exists(os.path.join(expert_dir, name))]
+            
+            if expert_paths:
+                models_list = []
+                for path in expert_paths:
+                    processor = AutoImageProcessor.from_pretrained(path)
+                    expert_model = get_yolos_model(path, processor, 'yolos').to(device)
+                    expert_model.eval()
+                    models_list.append(expert_model)
+                
+                if len(models_list) >= 2:
+                    integrated_moe = IntegratedMoE(models_list, n_models=len(models_list), top_k=2)
+                    # Load with strict=False to ignore mismatched keys
+                    state_dict = torch.load(moe_model, map_location=device)
+                    missing, unexpected = integrated_moe.load_state_dict(state_dict, strict=False)
+                    integrated_moe.eval().to(device)
+                    moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
+                    
+                    # Create MoE trainer
+                    moe_trainer = Trainer(
+                        model=moe_detector,
+                        args=training_args,
+                        processing_class=image_processor,
+                        data_collator=collate_fn,
+                        compute_metrics=eval_compute_metrics_fn,
+                    )
+                    
+                    # Evaluate MoE
+                    moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+                    print(f"\n=== MoE Test Results ===")
+                    for key, value in moe_results.items():
+                        if isinstance(value, float):
+                            print(f"{key}: {value:.4f}")
+                        else:
+                            print(f"{key}: {value}")
+                    
+                else:
+                    print("Error: Need at least 2 expert models for MoE")
+            else:
+                print("Error: No expert models found")
+                
+        except Exception as e:
+            print(f"MoE testing failed: {e}")
+            import traceback
+            traceback.print_exc()
+    elif moe_model:
+        print(f"\n=== MoE Error ===")
+        if not os.path.exists(moe_model):
+            print(f"MoE model not found: {moe_model}")
+        elif not weight_dir:
+            print(f"weight_dir required for MoE testing")
+    else:
+        print(f"\n=== MoE Not Provided ===")
+    
+    # Summary comparison
+    print(f"\n=== Summary Comparison ===")
+    if expert_results:
+        expert_map = expert_results.get('expert_map', 'N/A')
+        expert_map_50 = expert_results.get('expert_map_50', 'N/A')
+        print(f"Expert ({DATASET_NAME}) mAP: {expert_map}")
+        print(f"Expert ({DATASET_NAME}) mAP@50: {expert_map_50}")
+    
+    if moe_results:
+        moe_map = moe_results.get('moe_map', 'N/A')
+        moe_map_50 = moe_results.get('moe_map_50', 'N/A')
+        print(f"MoE (all experts) mAP: {moe_map}")
+        print(f"MoE (all experts) mAP@50: {moe_map_50}")
+        
+        # Calculate improvement
+        if isinstance(expert_map, float) and isinstance(moe_map, float):
+            improvement = moe_map - expert_map
+            improvement_pct = (improvement / expert_map) * 100 if expert_map != 0 else 0
+            print(f"mAP Improvement: {improvement:.4f} ({improvement_pct:+.2f}%)")
+        
+        if isinstance(expert_map_50, float) and isinstance(moe_map_50, float):
+            improvement_50 = moe_map_50 - expert_map_50
+            improvement_50_pct = (improvement_50 / expert_map_50) * 100 if expert_map_50 != 0 else 0
+            print(f"mAP@50 Improvement: {improvement_50:.4f} ({improvement_50_pct:+.2f}%)")
+    else:
+        print("MoE: Not tested or failed")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
