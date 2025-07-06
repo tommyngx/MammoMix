@@ -77,16 +77,11 @@ def load_config(config_path):
 def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     """Test MoE model and print sample outputs"""
     
-    print(f"DEBUG: Starting MoE model testing...")
-    #print(f"DEBUG: MoE model path: {moe_model_path}")
-    #print(f"DEBUG: Expert directory: {expert_dir}")
-    
     # Load all expert models for MoE
     expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
     expert_paths = [os.path.join(expert_dir, name) for name in expert_names]
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"DEBUG: Using device: {device}")
     
     # Load expert models
     models = []
@@ -94,68 +89,32 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     
     for path in expert_paths:
         if os.path.exists(path):
-            print(f"DEBUG: Loading expert from {path}")
             processor = AutoImageProcessor.from_pretrained(path)
             model = get_yolos_model(path, processor, 'yolos').to(device)
             models.append(model)
             image_processors.append(processor)
             print(f"Loaded expert: {os.path.basename(path)}")
-        else:
-            print(f"DEBUG: Expert path not found: {path}")
     
     if not models:
         print("No expert models found for MoE!")
         return None
     
-    print(f"DEBUG: Total experts loaded: {len(models)}")
-    
     # Create MoE model
-    print(f"DEBUG: Creating IntegratedMoE...")
     integrated_moe = IntegratedMoE(models, n_models=len(models), top_k=2)
-    
-    print(f"DEBUG: Loading MoE state dict...")
     integrated_moe.load_state_dict(torch.load(moe_model_path, map_location=device))
     integrated_moe.eval()
     
     # Move entire MoE model to device
     integrated_moe = integrated_moe.to(device)
-    print(f"DEBUG: MoE model loaded and moved to {device}")
     
     # Wrap for compatibility
-    print(f"DEBUG: Wrapping MoE for object detection...")
     moe_detector = MoEObjectDetectionModel(integrated_moe)
-    moe_detector = moe_detector.to(device)  # Ensure wrapper is also on device
+    moe_detector = moe_detector.to(device)
     
     # Setup evaluation
-    print(f"DEBUG: Setting up evaluation function...")
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
     
-    # Test with a single sample first
-    print(f"DEBUG: Testing with single sample...")
-    try:
-        sample = test_dataset[0]
-        print(f"DEBUG: Sample keys: {sample.keys()}")
-        print(f"DEBUG: Sample pixel_values shape: {sample['pixel_values'].shape}")
-        print(f"DEBUG: Sample labels type: {type(sample['labels'])}")
-        
-        # Test MoE forward pass
-        pixel_values = sample['pixel_values'].unsqueeze(0).to(device)
-        print(f"DEBUG: Input shape: {pixel_values.shape}")
-        
-        with torch.no_grad():
-            output = moe_detector(pixel_values)
-            print(f"DEBUG: MoE output type: {type(output)}")
-            print(f"DEBUG: MoE output has logits: {hasattr(output, 'logits')}")
-            if hasattr(output, 'logits'):
-                print(f"DEBUG: MoE logits shape: {output.logits.shape}")
-    except Exception as e:
-        print(f"DEBUG: Single sample test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-    
     # Create trainer
-    print(f"DEBUG: Creating trainer...")
     training_args = TrainingArguments(
         output_dir='./temp_output',
         per_device_eval_batch_size=4,
@@ -172,7 +131,6 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
         compute_metrics=eval_compute_metrics_fn,
     )
     
-    print(f"DEBUG: Starting trainer evaluation...")
     print(f"\n=== Testing MoE Model ===")
     
     try:
@@ -365,6 +323,48 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
     print(f"\n=== Expert ({DATASET_NAME}) Test Results ===")
     for key, value in test_results.items():
         if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+    
+    # Test MoE model if provided
+    moe_results = None
+    if moe_model and os.path.exists(moe_model):
+        if weight_dir:
+            expert_dir = os.path.dirname(weight_dir)  # Parent directory containing all experts
+            try:
+                moe_results = test_moe_model(moe_model, expert_dir, test_dataset, image_processor)
+            except Exception as e:
+                print(f"MoE testing failed: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("Warning: weight_dir required for MoE testing (to find expert models)")
+    elif moe_model:
+        print(f"MoE model not found: {moe_model}")
+    
+    # Summary comparison
+    print(f"\n=== Summary Comparison ===")
+    if test_results:
+        expert_map = test_results.get('test_map', 'N/A')
+        print(f"Expert ({DATASET_NAME}) mAP: {expert_map}")
+    
+    if moe_results:
+        moe_map = moe_results.get('moe_map', 'N/A')
+        print(f"MoE (all experts) mAP: {moe_map}")
+    else:
+        print("MoE: Not tested or failed")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
+    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
+    parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
+    args = parser.parse_args()
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
             print(f"{key}: {value:.4f}")
         else:
             print(f"{key}: {value}")
