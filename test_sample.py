@@ -73,7 +73,7 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def main(config_path, epoch=None, dataset=None, weight_dir=None):
+def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8):
     config = load_config(config_path)
     DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
@@ -192,7 +192,43 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None):
         model_type=get_model_type(MODEL_NAME),
         dataset_epoch=epoch
     )
-    print(f'Test loader: {len(test_dataset)} samples')
+    
+    # Limit to small sample size for testing
+    original_size = len(test_dataset)
+    if len(test_dataset) > num_samples:
+        indices = list(range(num_samples))
+        test_dataset = torch.utils.data.Subset(test_dataset, indices)
+    
+    print(f'Original test dataset: {original_size} samples')
+    print(f'Limited to: {len(test_dataset)} samples')
+    
+    # Print individual sample details
+    print(f"\n=== Sample Details (First 4) ===")
+    for i in range(min(4, len(test_dataset))):
+        try:
+            sample = test_dataset[i]
+            labels = sample['labels']
+            print(f"Sample {i}:")
+            print(f"  Image shape: {sample['pixel_values'].shape}")
+            print(f"  Image dtype: {sample['pixel_values'].dtype}")
+            print(f"  Labels type: {type(labels)}")
+            
+            if isinstance(labels, dict):
+                print(f"  Image ID: {labels.get('image_id', 'N/A')}")
+                boxes = labels.get('boxes', [])
+                print(f"  Boxes shape: {np.array(boxes).shape if len(boxes) > 0 else 'Empty'}")
+                print(f"  Boxes: {boxes}")
+                classes = labels.get('class_labels', [])
+                print(f"  Classes: {classes}")
+                print(f"  Areas: {labels.get('area', [])}")
+                print(f"  Size: {labels.get('size', 'N/A')}")
+                print(f"  Orig size: {labels.get('orig_size', 'N/A')}")
+            print("-" * 50)
+        except Exception as e:
+            print(f"Error loading sample {i}: {e}")
+            import traceback
+            traceback.print_exc()
+    
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     print("\n=== Test Results ===")
     for key, value in test_results.items():
@@ -207,5 +243,6 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
+    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
     args = parser.parse_args()
-    main(args.config, args.epoch, args.dataset, args.weight_dir)
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples)
