@@ -300,6 +300,8 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         print(f"DEBUG MoE output:")
                         print(f"  Logits shape: {moe_output.logits.shape}")
                         print(f"  Pred boxes shape: {moe_output.pred_boxes.shape}")
+                        print(f"  Pred boxes last dimension: {moe_output.pred_boxes.shape[-1]}")
+                        print(f"  Pred boxes full shape: {list(moe_output.pred_boxes.shape)}")
                         print(f"  Output type: {type(moe_output)}")
                         print(f"  Has pred_boxes attr: {hasattr(moe_output, 'pred_boxes')}")
                         print(f"  Has loss attr: {hasattr(moe_output, 'loss')}")
@@ -307,11 +309,11 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         
                         # Compare with expert
                         print(f"DEBUG Comparison:")
-                        print(f"  Expert has pred_boxes: {hasattr(expert_output, 'pred_boxes')}")
-                        print(f"  MoE has pred_boxes: {hasattr(moe_output, 'pred_boxes')}")
-                        print(f"  Expert output keys: {list(expert_output.keys()) if hasattr(expert_output, 'keys') else 'No keys method'}")
-                        print(f"  MoE output keys: {list(moe_output.keys()) if hasattr(moe_output, 'keys') else 'No keys method'}")
-                    
+                        print(f"  Expert pred_boxes shape: {expert_output.pred_boxes.shape}")
+                        print(f"  Expert pred_boxes last dim: {expert_output.pred_boxes.shape[-1]}")
+                        print(f"  MoE pred_boxes shape: {moe_output.pred_boxes.shape}")
+                        print(f"  MoE pred_boxes last dim: {moe_output.pred_boxes.shape[-1]}")
+
                     # Create a wrapper for MoE model that adds missing loss and last_hidden_state
                     class MoEModelWithLoss(torch.nn.Module):
                         def __init__(self, moe_model):
@@ -335,12 +337,27 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                             else:
                                 last_hidden_state = outputs.last_hidden_state
                             
-                            # Ensure pred_boxes has correct shape [batch_size, num_queries, 4]
+                            # Fix pred_boxes shape - ensure exactly 4 dimensions in last axis
                             pred_boxes = outputs.pred_boxes
-                            if pred_boxes.shape[-1] != 4:
-                                print(f"WARNING: pred_boxes shape {pred_boxes.shape} != expected [..., 4]")
-                                # Reshape or slice to get exactly 4 dimensions
+                            print(f"DEBUG MoE pred_boxes before fix: shape={pred_boxes.shape}")
+                            
+                            if len(pred_boxes.shape) > 3:
+                                # If there are extra dimensions, take only the first 4 of the last dimension
                                 pred_boxes = pred_boxes[..., :4]
+                                print(f"DEBUG MoE pred_boxes after slice: shape={pred_boxes.shape}")
+                            elif pred_boxes.shape[-1] != 4:
+                                print(f"WARNING: pred_boxes last dimension is {pred_boxes.shape[-1]}, expected 4")
+                                if pred_boxes.shape[-1] > 4:
+                                    pred_boxes = pred_boxes[..., :4]
+                                else:
+                                    # Pad with zeros if less than 4
+                                    padding_size = 4 - pred_boxes.shape[-1]
+                                    padding = torch.zeros(*pred_boxes.shape[:-1], padding_size, device=pred_boxes.device)
+                                    pred_boxes = torch.cat([pred_boxes, padding], dim=-1)
+                                print(f"DEBUG MoE pred_boxes after fix: shape={pred_boxes.shape}")
+                            
+                            # Verify final shape
+                            assert pred_boxes.shape[-1] == 4, f"pred_boxes final shape {pred_boxes.shape} doesn't end with 4"
                             
                             # Return YolosObjectDetectionOutput with all required fields
                             return YolosObjectDetectionOutput(
