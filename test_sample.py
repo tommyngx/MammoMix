@@ -134,52 +134,26 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     print(f"\n=== Testing MoE Model ===")
     
     try:
-        # Add debug to see what's being passed to evaluation
-        print(f"DEBUG: Test dataset type: {type(test_dataset)}")
-        print(f"DEBUG: Test dataset length: {len(test_dataset)}")
-        
         # Test a single batch to see the data structure
         from torch.utils.data import DataLoader
         test_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn)
         sample_batch = next(iter(test_loader))
         
-        print(f"DEBUG: Sample batch keys: {sample_batch.keys()}")
-        print(f"DEBUG: Sample batch labels type: {type(sample_batch['labels'])}")
+        print(f"DEBUG: Test dataset length for MoE: {len(test_dataset)}")
         print(f"DEBUG: Sample batch labels length: {len(sample_batch['labels'])}")
-        if len(sample_batch['labels']) > 0:
-            print(f"DEBUG: First label type: {type(sample_batch['labels'][0])}")
         
         # Test MoE model output on this batch
-        print(f"\nDEBUG: Testing MoE model output...")
         pixel_values = sample_batch['pixel_values'].to(device)
-        print(f"DEBUG: Input to MoE shape: {pixel_values.shape}")
         
         with torch.no_grad():
             moe_output = moe_detector(pixel_values)
-            print(f"DEBUG: MoE output type: {type(moe_output)}")
-            print(f"DEBUG: MoE output attributes: {dir(moe_output)}")
-            if hasattr(moe_output, 'logits'):
-                print(f"DEBUG: MoE logits shape: {moe_output.logits.shape}")
-                print(f"DEBUG: MoE logits sample: {moe_output.logits[0, :3, :]}")  # First 3 queries
-            if hasattr(moe_output, 'pred_boxes'):
-                print(f"DEBUG: MoE pred_boxes shape: {moe_output.pred_boxes.shape}")
-            if hasattr(moe_output, 'loss'):
-                print(f"DEBUG: MoE loss: {moe_output.loss}")
-        
-        # Compare with expert model output for same batch
-        print(f"\nDEBUG: Comparing with expert model output...")
-        expert_model = models[0]  # Use first expert for comparison
-        with torch.no_grad():
-            expert_output = expert_model(pixel_values)
-            print(f"DEBUG: Expert output type: {type(expert_output)}")
-            if hasattr(expert_output, 'logits'):
-                print(f"DEBUG: Expert logits shape: {expert_output.logits.shape}")
-                print(f"DEBUG: Expert logits sample: {expert_output.logits[0, :3, :]}")  # First 3 queries
+            print(f"DEBUG: MoE logits shape: {moe_output.logits.shape}")
+            print(f"DEBUG: MoE logits sample: {moe_output.logits[0, :3, :]}")
         
         # Skip trainer evaluation and use manual evaluation
         print(f"\nDEBUG: Attempting manual evaluation...")
         
-        # Collect all predictions manually
+        # Collect all predictions manually using the SAME test_dataset that expert used
         all_predictions = []
         all_targets = []
         
@@ -193,23 +167,28 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
                 outputs = moe_detector(pixel_values_batch)
                 all_predictions.append(outputs.logits.cpu())
                 all_targets.extend(labels_batch)
+                
+            print(f"DEBUG: Batch {batch_idx}, predictions shape: {outputs.logits.shape}, targets: {len(labels_batch)}")
         
-        # Create evaluation prediction object exactly like expert evaluation does
-        predictions_tensor = torch.cat(all_predictions, dim=0)
+        print(f"DEBUG: Total predictions collected: {len(all_predictions)}")
+        print(f"DEBUG: Total targets collected: {len(all_targets)}")
         
         # Format predictions exactly like the trainer does
         predictions_formatted = []
-        batch_size = 2
-        for i in range(0, len(all_predictions)):
+        for i in range(len(all_predictions)):
             batch_logits = all_predictions[i].numpy()
-            batch_pred_boxes = torch.zeros(batch_logits.shape[0], batch_logits.shape[1], 4).numpy()  # Dummy boxes
+            batch_pred_boxes = torch.zeros(batch_logits.shape[0], batch_logits.shape[1], 4).numpy()
             predictions_formatted.append((None, batch_logits, batch_pred_boxes))
         
         # Format targets as list of batches
         targets_formatted = []
+        batch_size = 2
         for i in range(0, len(all_targets), batch_size):
             batch_targets = all_targets[i:i+batch_size]
             targets_formatted.append(batch_targets)
+            
+        print(f"DEBUG: Formatted predictions: {len(predictions_formatted)} batches")
+        print(f"DEBUG: Formatted targets: {len(targets_formatted)} batches")
         
         # Create evaluation object
         from types import SimpleNamespace
@@ -405,6 +384,27 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
         print(f"MoE model not found: {moe_model}")
     
     # Summary comparison
+    print(f"\n=== Summary Comparison ===")
+    if test_results:
+        expert_map = test_results.get('test_map', 'N/A')
+        print(f"Expert ({DATASET_NAME}) mAP: {expert_map}")
+    
+    if moe_results:
+        moe_map = moe_results.get('moe_map', 'N/A')
+        print(f"MoE (all experts) mAP: {moe_map}")
+    else:
+        print("MoE: Not tested or failed")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
+    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
+    parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
+    args = parser.parse_args()
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
     print(f"\n=== Summary Comparison ===")
     if test_results:
         expert_map = test_results.get('test_map', 'N/A')
