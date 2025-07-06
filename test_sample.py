@@ -93,7 +93,6 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
             model = get_yolos_model(path, processor, 'yolos').to(device)
             models.append(model)
             image_processors.append(processor)
-            #print(f"Loaded expert: {os.path.basename(path)}")
     
     if not models:
         print("No expert models found for MoE!")
@@ -101,7 +100,13 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     
     # Create MoE model
     integrated_moe = IntegratedMoE(models, n_models=len(models), top_k=2)
-    integrated_moe.load_state_dict(torch.load(moe_model_path, map_location=device))
+    # Load with strict=False to ignore mismatched keys
+    state_dict = torch.load(moe_model_path, map_location=device)
+    missing, unexpected = integrated_moe.load_state_dict(state_dict, strict=False)
+    if missing:
+        print(f"WARNING: Missing keys when loading MoE: {len(missing)} keys")
+    if unexpected:
+        print(f"WARNING: Unexpected keys when loading MoE: {len(unexpected)} keys")
     integrated_moe.eval()
     
     # Move entire MoE model to device
@@ -111,13 +116,13 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     moe_detector = MoEObjectDetectionModel(integrated_moe)
     moe_detector = moe_detector.to(device)
     
-    # Setup evaluation
+    # Setup evaluation using trainer.evaluate like expert does
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
     
-    # Create trainer
+    # Create trainer for MoE - same setup as expert
     training_args = TrainingArguments(
         output_dir='./temp_output',
-        per_device_eval_batch_size=4,
+        per_device_eval_batch_size=2,  # Same as expert uses
         dataloader_num_workers=0,
         remove_unused_columns=False,
         report_to=[],
@@ -134,90 +139,21 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
     print(f"\n=== Testing MoE Model ===")
     
     try:
-        # Test a single batch to see the data structure
-        from torch.utils.data import DataLoader
-        test_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn)
-        sample_batch = next(iter(test_loader))
+        # Use trainer.evaluate() exactly like expert does
+        print(f"DEBUG: MoE evaluation using trainer.evaluate()...")
+        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
         
-        print(f"DEBUG: Test dataset length for MoE: {len(test_dataset)}")
-        print(f"DEBUG: Sample batch labels length: {len(sample_batch['labels'])}")
-        
-        # Test MoE model output on this batch
-        pixel_values = sample_batch['pixel_values'].to(device)
-        
-        with torch.no_grad():
-            moe_output = moe_detector(pixel_values)
-            print(f"DEBUG: MoE logits shape: {moe_output.logits.shape}")
-            print(f"DEBUG: MoE logits sample: {moe_output.logits[0, :3, :]}")
-        
-        # Skip trainer evaluation and use manual evaluation
-        print(f"\nDEBUG: Attempting manual evaluation...")
-        
-        # Collect all predictions manually using the SAME test_dataset that expert used
-        all_predictions = []
-        all_targets = []
-        
-        eval_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn, shuffle=False)
-        
-        for batch_idx, batch in enumerate(eval_loader):
-            pixel_values_batch = batch['pixel_values'].to(device)
-            labels_batch = batch['labels']
-            
-            with torch.no_grad():
-                outputs = moe_detector(pixel_values_batch)
-                all_predictions.append(outputs.logits.cpu())
-                all_targets.extend(labels_batch)
-                
-            #print(f"DEBUG: Batch {batch_idx}, predictions shape: {outputs.logits.shape}, targets: {len(labels_batch)}")
-        
-        print(f"DEBUG: Total predictions collected: {len(all_predictions)}")
-        print(f"DEBUG: Total targets collected: {len(all_targets)}")
-        
-        # Format predictions exactly like the trainer does
-        predictions_formatted = []
-        for i in range(len(all_predictions)):
-            batch_logits = all_predictions[i].numpy()
-            batch_pred_boxes = torch.zeros(batch_logits.shape[0], batch_logits.shape[1], 4).numpy()
-            predictions_formatted.append((None, batch_logits, batch_pred_boxes))
-        
-        # Format targets as list of batches
-        targets_formatted = []
-        batch_size = 2
-        for i in range(0, len(all_targets), batch_size):
-            batch_targets = all_targets[i:i+batch_size]
-            targets_formatted.append(batch_targets)
-            
-        print(f"DEBUG: Formatted predictions: {len(predictions_formatted)} batches")
-        print(f"DEBUG: Formatted targets: {len(targets_formatted)} batches")
-        
-        # Create evaluation object
-        from types import SimpleNamespace
-        eval_pred = SimpleNamespace()
-        eval_pred.predictions = predictions_formatted
-        eval_pred.label_ids = targets_formatted
-        
-        # Add debugging before calling evaluation
-        print(f"DEBUG: First prediction batch shape: {predictions_formatted[0][1].shape}")
-        print(f"DEBUG: First prediction values sample: {predictions_formatted[0][1][0, :3, :]}")
-        print(f"DEBUG: First target batch length: {len(targets_formatted[0])}")
-        if len(targets_formatted[0]) > 0:
-            print(f"DEBUG: First target sample keys: {targets_formatted[0][0].keys()}")
-            print(f"DEBUG: First target boxes: {targets_formatted[0][0].get('boxes', [])}")
-        
-        # Call evaluation function directly
-        metrics = eval_compute_metrics_fn(eval_pred)
-        
-        print("\n=== MoE Test Results (Manual) ===")
-        for key, value in metrics.items():
+        print("\n=== MoE Test Results (Trainer) ===")
+        for key, value in test_results.items():
             if isinstance(value, float):
-                print(f"moe_{key}: {value:.4f}")
+                print(f"{key}: {value:.4f}")
             else:
-                print(f"moe_{key}: {value}")
+                print(f"{key}: {value}")
         
-        return {f"moe_{k}": v for k, v in metrics.items()}
-    
+        return test_results
+        
     except Exception as e:
-        print(f"DEBUG: Manual evaluation failed: {e}")
+        print(f"DEBUG: MoE trainer evaluation failed: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -424,3 +360,51 @@ if __name__ == "__main__":
         args.num_samples = int(args.num_samples)
     
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
+    print(f"\n=== Expert ({DATASET_NAME}) Test Results ===")
+    for key, value in test_results.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+    
+    # Show expert model output for comparison
+    print(f"\n=== Expert Model Output Analysis ===")
+    test_loader = DataLoader(test_dataset, batch_size=2, collate_fn=collate_fn)
+    sample_batch = next(iter(test_loader))
+    pixel_values = sample_batch['pixel_values'].to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    
+    with torch.no_grad():
+        expert_output = model(pixel_values)
+        print(f"Expert output type: {type(expert_output)}")
+        print(f"Expert logits shape: {expert_output.logits.shape}")
+        print(f"Expert pred_boxes shape: {expert_output.pred_boxes.shape}")
+        print(f"Expert logits sample (first 3 queries):")
+        print(expert_output.logits[0, :3, :])
+        
+    # Test MoE model if provided
+    moe_results = None
+    if moe_model and os.path.exists(moe_model):
+        if weight_dir:
+            expert_dir = os.path.dirname(weight_dir)  # Parent directory containing all experts
+            try:
+                moe_results = test_moe_model(moe_model, expert_dir, test_dataset, image_processor)
+            except Exception as e:
+                print(f"MoE testing failed: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("Warning: weight_dir required for MoE testing (to find expert models)")
+    elif moe_model:
+        print(f"MoE model not found: {moe_model}")
+    
+    # Summary comparison
+    print(f"\n=== Summary Comparison ===")
+    if test_results:
+        expert_map = test_results.get('test_map', 'N/A')
+        print(f"Expert ({DATASET_NAME}) mAP: {expert_map}")
+    
+    if moe_results:
+        moe_map = moe_results.get('moe_map', 'N/A')
+        print(f"MoE (all experts) mAP: {moe_map}")
+    else:
+        print("MoE: Not tested or failed")
