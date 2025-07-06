@@ -336,9 +336,15 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
     
     # Limit to small sample size for testing
     original_size = len(test_dataset)
-    if len(test_dataset) > num_samples:
+    print(f'DEBUG: num_samples value: {num_samples}, type: {type(num_samples)}')
+    print(f'DEBUG: original dataset size: {original_size}')
+    
+    if num_samples != 'all' and len(test_dataset) > num_samples:
         indices = list(range(num_samples))
         test_dataset = torch.utils.data.Subset(test_dataset, indices)
+        print(f'DEBUG: Dataset limited from {original_size} to {len(test_dataset)}')
+    else:
+        print(f'DEBUG: Using full dataset of {len(test_dataset)} samples')
     
     print(f'Original test dataset: {original_size} samples')
     print(f'Limited to: {len(test_dataset)} samples')
@@ -401,9 +407,14 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
-    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
+    parser.add_argument('--num_samples', default=8, help='Number of test samples to use (or "all" for full dataset)')
     parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
     args = parser.parse_args()
+    
+    # Convert num_samples to int if it's not "all"
+    if args.num_samples != 'all':
+        args.num_samples = int(args.num_samples)
+    
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
     print(f"\n=== Summary Comparison ===")
     if test_results:
@@ -422,7 +433,7 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
-    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
+    parser.add_argument('--num_samples', default=8, help='Number of test samples to use (or "all" for full dataset)')
     parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
     args = parser.parse_args()
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
@@ -445,7 +456,7 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
-    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
+    parser.add_argument('--num_samples', default=8, help='Number of test samples to use (or "all" for full dataset)')
     parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
     args = parser.parse_args()
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
@@ -453,7 +464,7 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_dir', type=str, default=None, help='Path to model folder containing config.json, model.safetensors, preprocessor_config.json')
-    parser.add_argument('--num_samples', type=int, default=8, help='Number of test samples to use')
+    parser.add_argument('--num_samples', default=8, help='Number of test samples to use (or "all" for full dataset)')
     parser.add_argument('--moe_model', type=str, default=None, help='Path to trained MoE model file')
     args = parser.parse_args()
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.num_samples, args.moe_model)
