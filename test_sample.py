@@ -93,7 +93,7 @@ def test_moe_model(moe_model_path, expert_dir, test_dataset, image_processor):
             model = get_yolos_model(path, processor, 'yolos').to(device)
             models.append(model)
             image_processors.append(processor)
-            print(f"Loaded expert: {os.path.basename(path)}")
+            #print(f"Loaded expert: {os.path.basename(path)}")
     
     if not models:
         print("No expert models found for MoE!")
