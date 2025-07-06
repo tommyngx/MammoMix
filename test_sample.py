@@ -28,10 +28,10 @@ def load_config(config_path):
     return config
 
 def test_individual_expert(expert_model_path, test_loader, image_processor, device, expert_name="Expert"):
-    """Test individual expert model and return results - following test.py approach."""
+    """Test individual expert model and return results - following test.py approach exactly."""
     print(f"\n=== Testing {expert_name} Model ===")
     
-    # Load the expert model
+    # Load the expert model exactly like test.py
     expert_model = AutoModelForObjectDetection.from_pretrained(
         expert_model_path,
         id2label={0: 'cancer'},
@@ -42,51 +42,61 @@ def test_individual_expert(expert_model_path, test_loader, image_processor, devi
     
     expert_model.eval()
     
-    # Setup evaluation function
+    # Setup evaluation exactly like test.py
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
     
-    all_predictions = []
-    all_targets = []
+    # Create trainer exactly like test.py does
+    from transformers import Trainer, TrainingArguments
     
-    print(f"Evaluating {expert_name} on {len(test_loader)} batches...")
+    # Create a dummy dataset from the loader for trainer
+    class SimpleDataset:
+        def __init__(self, test_loader):
+            self.data = []
+            for batch in test_loader:
+                for i in range(len(batch['labels'])):
+                    item = {
+                        'pixel_values': batch['pixel_values'][i],
+                        'labels': batch['labels'][i]
+                    }
+                    self.data.append(item)
+        
+        def __len__(self):
+            return len(self.data)
+        
+        def __getitem__(self, idx):
+            return self.data[idx]
     
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(test_loader):
-            pixel_values = batch['pixel_values'].to(device)
-            labels = batch['labels']
-            
-            # Get model predictions
-            outputs = expert_model(pixel_values)
-            
-            # Store predictions and targets for metrics calculation
-            all_predictions.append(outputs.logits.cpu())
-            all_targets.extend(labels)
-            
-            if batch_idx == 0:
-                print(f"  Batch 0 - Images: {pixel_values.shape[0]}, Labels: {len(labels)}")
+    # Convert loader back to dataset
+    eval_dataset = SimpleDataset(test_loader)
+    
+    # Use Trainer exactly like test.py
+    trainer = Trainer(
+        model=expert_model,
+        args=TrainingArguments(
+            output_dir='./temp_output',
+            per_device_eval_batch_size=4,
+            dataloader_num_workers=0,
+            remove_unused_columns=False,
+            report_to=[],
+        ),
+        eval_dataset=eval_dataset,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
     
     try:
-        # Compute metrics using the same approach as test.py
-        predictions = torch.cat(all_predictions, dim=0)
-        
-        # Create EvalPrediction-like object that evaluation function expects
-        class EvalPrediction:
-            def __init__(self, predictions, label_ids):
-                self.predictions = predictions
-                self.label_ids = label_ids
-        
-        eval_pred = EvalPrediction(predictions, all_targets)
-        
-        metrics = eval_compute_metrics_fn(eval_pred)
+        # Evaluate exactly like test.py
+        results = trainer.evaluate(eval_dataset=eval_dataset)
         
         print(f"{expert_name} Results:")
-        for key, value in metrics.items():
+        for key, value in results.items():
             if isinstance(value, float):
                 print(f"  {key}: {value:.4f}")
             else:
                 print(f"  {key}: {value}")
                 
-        return metrics
+        return results
     
     except Exception as e:
         print(f"{expert_name} evaluation failed: {e}")
@@ -95,7 +105,7 @@ def test_individual_expert(expert_model_path, test_loader, image_processor, devi
         return None
 
 def test_moe_model(moe_model_path, expert_models, test_loader, image_processors, device):
-    """Test MoE model and return results - following test.py approach."""
+    """Test MoE model exactly like test.py approach."""
     print(f"\n=== Testing MoE Model ===")
     
     # Create MoE model
@@ -106,51 +116,60 @@ def test_moe_model(moe_model_path, expert_models, test_loader, image_processors,
     # Wrap for object detection compatibility
     moe_detector = MoEObjectDetectionModel(integrated_moe)
     
-    # Setup evaluation function
+    # Setup evaluation exactly like test.py
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processors[0])
     
-    all_predictions = []
-    all_targets = []
+    from transformers import Trainer, TrainingArguments
     
-    print(f"Evaluating MoE on {len(test_loader)} batches...")
+    # Create a dummy dataset from the loader for trainer
+    class SimpleDataset:
+        def __init__(self, test_loader):
+            self.data = []
+            for batch in test_loader:
+                for i in range(len(batch['labels'])):
+                    item = {
+                        'pixel_values': batch['pixel_values'][i],
+                        'labels': batch['labels'][i]
+                    }
+                    self.data.append(item)
+        
+        def __len__(self):
+            return len(self.data)
+        
+        def __getitem__(self, idx):
+            return self.data[idx]
     
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(test_loader):
-            pixel_values = batch['pixel_values'].to(device)
-            labels = batch['labels']
-            
-            # Get MoE predictions
-            outputs = moe_detector(pixel_values)
-            
-            # Store predictions and targets for metrics calculation
-            all_predictions.append(outputs.logits.cpu())
-            all_targets.extend(labels)
-            
-            if batch_idx == 0:
-                print(f"  Batch 0 - Images: {pixel_values.shape[0]}, Labels: {len(labels)}")
+    # Convert loader back to dataset
+    eval_dataset = SimpleDataset(test_loader)
+    
+    # Use Trainer exactly like test.py
+    trainer = Trainer(
+        model=moe_detector,
+        args=TrainingArguments(
+            output_dir='./temp_output',
+            per_device_eval_batch_size=4,
+            dataloader_num_workers=0,
+            remove_unused_columns=False,
+            report_to=[],
+        ),
+        eval_dataset=eval_dataset,
+        processing_class=image_processors[0],
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
     
     try:
-        # Compute metrics using the same approach as test.py
-        predictions = torch.cat(all_predictions, dim=0)
-        
-        # Create EvalPrediction-like object that evaluation function expects
-        class EvalPrediction:
-            def __init__(self, predictions, label_ids):
-                self.predictions = predictions
-                self.label_ids = label_ids
-        
-        eval_pred = EvalPrediction(predictions, all_targets)
-        
-        metrics = eval_compute_metrics_fn(eval_pred)
+        # Evaluate exactly like test.py
+        results = trainer.evaluate(eval_dataset=eval_dataset)
         
         print("MoE Results:")
-        for key, value in metrics.items():
+        for key, value in results.items():
             if isinstance(value, float):
                 print(f"  {key}: {value:.4f}")
             else:
                 print(f"  {key}: {value}")
                 
-        return metrics
+        return results
     
     except Exception as e:
         print(f"MoE evaluation failed: {e}")
