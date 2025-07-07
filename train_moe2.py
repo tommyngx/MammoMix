@@ -203,11 +203,6 @@ class ImageRouterMoE(nn.Module):
             last_hidden_state=batch_last_hidden_state
         )
         
-        # CRITICAL DEBUG: Verify the created output object
-        print(f"[FINAL DEBUG] Created output - logits: {combined_output.logits.shape}, pred_boxes: {combined_output.pred_boxes.shape}")
-        if hasattr(combined_output, 'last_hidden_state') and combined_output.last_hidden_state is not None:
-            print(f"[FINAL DEBUG] last_hidden_state: {combined_output.last_hidden_state.shape}")
-        
         # CRITICAL: Final check before returning - ensure pred_boxes is exactly 4D
         if combined_output.pred_boxes.shape[-1] != 4:
             print(f"EMERGENCY: Final output pred_boxes has {combined_output.pred_boxes.shape[-1]} dims, forcing to 4")
@@ -237,7 +232,6 @@ class ImageRouterMoE(nn.Module):
         
         # Final verification
         final_shape = combined_output.pred_boxes.shape
-        print(f"[FINAL DEBUG] About to return - pred_boxes: {final_shape}")
         assert final_shape[-1] == 4, f"CRITICAL FAILURE: pred_boxes still has {final_shape[-1]} dims after all safety checks!"
         
         if return_routing:
@@ -251,7 +245,6 @@ class ImageRouterMoE(nn.Module):
         Ensures pred_boxes always has exactly 4 dimensions.
         """
         if expert_output.pred_boxes.shape[-1] != 4:
-            print(f"FIXING: Expert pred_boxes has {expert_output.pred_boxes.shape[-1]} dims, fixing to 4")
             # Create a new output object with fixed dimensions
             fixed_pred_boxes = expert_output.pred_boxes[..., :4].contiguous()
             
