@@ -43,7 +43,7 @@ def load_config(config_path):
 class ImageRouterMoE(nn.Module):
     """
     Router-based MoE that learns to route images to the best expert.
-    OPTIMIZED: Much faster training with simplified routing supervision
+    FIXED: Add proper routing supervision for meaningful learning
     """
     def __init__(self, expert_models, device):
         super().__init__()
@@ -51,18 +51,26 @@ class ImageRouterMoE(nn.Module):
         self.device = device
         self.expert_names = ['CSAW', 'DMID', 'DDSM']  # For tracking
         
-        # SIMPLIFIED router network for faster training
+        # IMPROVED router network with more capacity
         self.router = nn.Sequential(
-            # Faster feature extraction with fewer parameters
-            nn.Conv2d(3, 16, 7, stride=8, padding=3),  # 640->80 (faster)
+            # Better feature extraction
+            nn.Conv2d(3, 32, 7, stride=4, padding=3),  # 640->160
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d(2),  # 80->2x2 = 4 features per channel
-            nn.Flatten(),  # 16*4 = 64 features (much smaller)
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),  # 160->80
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(4),  # 80->4x4 = 16 features per channel
+            nn.Flatten(),  # 64*16 = 1024 features
             
-            # Minimal classifier
-            nn.Linear(64, 16),
+            # Better classifier with more capacity
+            nn.Linear(1024, 256),
             nn.ReLU(),
-            nn.Linear(16, 3),  # 3 experts
+            nn.Dropout(0.3),
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 3),  # 3 experts
         )
         
         # Proper initialization
@@ -80,11 +88,12 @@ class ImageRouterMoE(nn.Module):
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f'Total parameters: {total_params / 1e6:.2f}M')
-        print(f'Trainable parameters: {trainable_params:.0f} (router only - ULTRA FAST)')
+        print(f'Trainable parameters: {trainable_params:.0f} (router with better capacity)')
         
-        # Add routing statistics
+        # Add routing statistics and loss tracking
         self.routing_counts = torch.zeros(3, device=device)  # Track expert usage
         self.total_routed = 0
+        self.expert_loss_history = []  # Track expert performance over time
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         """Enable gradient checkpointing for compatibility with Transformers Trainer."""
@@ -97,7 +106,7 @@ class ImageRouterMoE(nn.Module):
     def forward(self, pixel_values, labels=None, return_routing=False):
         """
         Forward pass: route each image to best expert and return expert's output.
-        OPTIMIZED: Remove expensive per-sample evaluation for much faster training
+        FIXED: Add proper routing supervision with expert performance feedback
         """
         batch_size = pixel_values.shape[0]
         
@@ -112,17 +121,60 @@ class ImageRouterMoE(nn.Module):
                 self.routing_counts[choice] += 1
             self.total_routed += batch_size
         
-        # ULTRA FAST routing loss: Simple diversity loss only
+        # IMPROVED routing loss with actual expert performance feedback
         routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         if labels is not None and self.training:
-            # Only use load balancing loss - no expensive expert evaluation
+            # Periodically evaluate expert performance for routing supervision
+            if len(self.expert_loss_history) < 50 or torch.rand(1).item() < 0.1:  # 10% of batches
+                # Quick expert performance evaluation (sample-wise)
+                with torch.no_grad():
+                    expert_losses = []
+                    for expert_idx in range(len(self.experts)):
+                        # Evaluate on a subset for speed (first 4 samples)
+                        subset_size = min(4, batch_size)
+                        subset_pixels = pixel_values[:subset_size]
+                        subset_labels = labels[:subset_size] if labels else None
+                        
+                        expert_output = self.experts[expert_idx](subset_pixels, labels=subset_labels)
+                        expert_output = self._fix_expert_output_dimensions(expert_output)
+                        
+                        if hasattr(expert_output, 'loss') and expert_output.loss is not None:
+                            expert_losses.append(expert_output.loss.item())
+                        else:
+                            expert_losses.append(float('inf'))
+                    
+                    # Store expert performance for future use
+                    self.expert_loss_history.append(expert_losses)
+                    if len(self.expert_loss_history) > 100:  # Keep recent history
+                        self.expert_loss_history.pop(0)
+            
+            # Use expert performance history for routing supervision
+            if len(self.expert_loss_history) > 0:
+                # Get average expert performance
+                avg_expert_losses = torch.tensor(self.expert_loss_history).mean(dim=0)
+                
+                # Create routing targets based on expert performance
+                # Better experts (lower loss) should have higher probability
+                expert_weights = 1.0 / (avg_expert_losses + 1e-6)  # Inverse of loss
+                expert_weights = expert_weights / expert_weights.sum()  # Normalize
+                
+                # Soft target for routing (encourage better experts)
+                routing_targets = expert_weights.unsqueeze(0).expand(batch_size, -1).to(self.device)
+                
+                # KL divergence loss to match expert performance distribution
+                routing_loss = F.kl_div(F.log_softmax(routing_logits, dim=1), 
+                                      routing_targets, reduction='batchmean')
+            
+            # Add diversity loss to prevent collapse to single expert
             expert_usage = routing_probs.mean(dim=0)
             uniform_usage = torch.ones_like(expert_usage) / len(self.experts)
-            routing_loss = F.mse_loss(expert_usage, uniform_usage)
+            diversity_loss = F.mse_loss(expert_usage, uniform_usage)
             
-            # Optional: Add entropy regularization for exploration
+            # Add entropy regularization for exploration
             entropy = -torch.sum(routing_probs * torch.log(routing_probs + 1e-8), dim=1).mean()
-            routing_loss = routing_loss - 0.01 * entropy  # Encourage exploration
+            
+            # Combine losses with proper weighting
+            routing_loss = routing_loss + 0.2 * diversity_loss - 0.05 * entropy
         
         # Execute routing: Group samples by expert choice
         expert_groups = {}
@@ -195,10 +247,10 @@ class ImageRouterMoE(nn.Module):
             if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
                 batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
         
-        # Combine detection loss and routing loss (reduced weight)
+        # Combine detection loss and routing loss with STRONGER routing supervision
         total_loss = total_detection_loss
         if labels is not None and routing_loss.item() > 0:
-            total_loss = total_loss + 0.1 * routing_loss  # Much weaker routing loss
+            total_loss = total_loss + 1.0 * routing_loss  # MUCH stronger routing loss
         
         # Final safety check
         assert batch_pred_boxes.shape[-1] == 4, f"pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
@@ -226,12 +278,15 @@ class ImageRouterMoE(nn.Module):
             return combined_output
     
     def _initialize_weights(self):
-        """Better weight initialization for faster learning"""
+        """Better weight initialization for router network."""
         for m in self.router.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.zeros_(m.bias)
@@ -631,18 +686,25 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     print(f"Best model will be automatically saved to: {output_dir}")
     
     try:
-        print(f"\n=== ULTRA FAST Router MoE Training ===")
-        print("Router learns through diversity loss only - MUCH FASTER!")
-        print("Expert selection will improve through reinforcement during training")
+        print(f"\n=== Router MoE Training with Performance Feedback ===")
+        print("Router learns from expert performance history - PROPER SUPERVISION!")
+        print("Better experts will be preferred, with diversity regularization")
         
         trainer.train()
         
-        # Print final routing statistics
+        # Print final routing statistics and expert performance
         print("\n=== Final Router Analysis ===")
         final_stats = model.get_routing_stats()
         print("Expert usage distribution:")
         for expert_name, usage in final_stats.items():
             print(f"  {expert_name}: {usage*100:.1f}%")
+        
+        # Print expert performance history
+        if hasattr(model, 'expert_loss_history') and len(model.expert_loss_history) > 0:
+            avg_losses = torch.tensor(model.expert_loss_history).mean(dim=0)
+            print("Average expert performance (lower is better):")
+            for i, name in enumerate(model.expert_names):
+                print(f"  {name}: {avg_losses[i]:.4f}")
         
         # Evaluate on test dataset (same as train.py structure)
         print("\n=== Evaluating on test dataset ===")
