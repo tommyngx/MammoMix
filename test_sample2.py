@@ -342,34 +342,16 @@ def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir,
                     print(f"❌ Post-processing failed: {e}")
                     return
                 
-                # Load config for training arguments (was missing)
-                config = load_config('configs/train_config.yaml')  # Add this line
-                training_cfg = config.get('training', {})
-                
-                # Copy exact TrainingArguments from test.py
-                import datetime
-                date_str = datetime.datetime.now().strftime("%d%m%y")
-                run_name = f"MoE_{dataset_name}_{date_str}"
-                
+                # Use minimal TrainingArguments for MoE evaluation (no need for complex config)
                 training_args = TrainingArguments(
                     output_dir='./temp_moe_output',
-                    run_name=run_name,
-                    per_device_eval_batch_size=training_cfg.get('batch_size', 8),
-                    eval_do_concat_batches=training_cfg.get('eval_do_concat_batches', False),
+                    per_device_eval_batch_size=1,  # Use batch size 1 for MoE
+                    eval_do_concat_batches=False,
                     disable_tqdm=False,
-                    logging_dir="./logs",
-                    eval_strategy="epoch",
-                    save_strategy="epoch", 
-                    save_total_limit=1,
-                    logging_strategy="epoch",
-                    report_to=[],  # Disable external loggers for testing
-                    load_best_model_at_end=True,
-                    metric_for_best_model='eval_map_50',
-                    greater_is_better=True,
+                    report_to=[],  # Disable external loggers
                     fp16=torch.cuda.is_available(),
-                    dataloader_num_workers=0,  # Use 0 for testing to avoid issues
-                    gradient_accumulation_steps=training_cfg.get('gradient_accumulation_steps', 2),
-                    remove_unused_columns=training_cfg.get('remove_unused_columns', False),
+                    dataloader_num_workers=0,
+                    remove_unused_columns=False,
                 )
                 
                 eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
@@ -378,12 +360,22 @@ def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir,
                     model=moe_detector,
                     args=training_args,
                     processing_class=image_processor,
-                    data_collator=collate_fn,  # SAME as test.py
+                    data_collator=collate_fn,
                     compute_metrics=eval_compute_metrics_fn,
                 )
                 
-                # Evaluate MoE
-                moe_results = evaluate_model(moe_detector, test_dataset, image_processor, config, device, "MoE")
+                # Simple evaluation without full config dependency
+                print("Running MoE evaluation...")
+                try:
+                    moe_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+                    print("\n=== MoE Results ===")
+                    for key, value in moe_results.items():
+                        if isinstance(value, float):
+                            print(f"{key}: {value:.4f}")
+                        else:
+                            print(f"{key}: {value}")
+                except Exception as eval_error:
+                    print(f"MoE evaluation failed: {eval_error}")
 
             else:
                 print("  Error: Need at least 2 expert models for MoE")
@@ -453,7 +445,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
     # Create test dataset
     test_dataset = create_test_dataset(SPLITS_DIR, DATASET_NAME, image_processor, MODEL_NAME, epoch)
     
-    # Handle one testing mode - pass image_processor
+    # Handle one testing mode - pass the config as well
     if one_testing:
         run_one_testing_mode(expert_model, test_dataset, moe_model, weight_dir, DATASET_NAME, device, image_processor)
         return
