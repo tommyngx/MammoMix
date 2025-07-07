@@ -278,89 +278,6 @@ def create_routing_dataset(config, image_processor, split='train', dataset_name=
     # The router will learn from object detection performance
     return dataset
 
-def get_safe_eval_compute_metrics_fn(image_processor):
-    """Get evaluation function with additional safety checks for pred_boxes dimensions."""
-    from functools import partial
-    
-    def safe_compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label=None, MAX_SIZE=640):
-        """
-        Safe version of compute_metrics that ensures pred_boxes always have 4 dimensions.
-        """
-        import torch
-        import numpy as np
-        from transformers.image_transforms import center_to_corners_format
-        from torchmetrics.functional.detection.map import mean_average_precision
-        from dataclasses import dataclass
-        
-        @dataclass
-        class SafeModelOutput:
-            logits: torch.Tensor
-            pred_boxes: torch.Tensor
-        
-        def convert_bbox_yolo_to_pascal(boxes, image_size):
-            boxes = center_to_corners_format(boxes)
-            height, width = image_size
-            boxes = boxes * torch.tensor([[width, height, width, height]])
-            return boxes
-        
-        image_sizes = []
-        post_processed_targets = []
-        post_processed_predictions = []
-        predictions, targets = evaluation_results.predictions, evaluation_results.label_ids
-
-        for batch in targets:
-            batch_image_sizes = torch.tensor(np.array([[MAX_SIZE, MAX_SIZE] for _ in batch]))
-            image_sizes.append(batch_image_sizes)
-            for image_target in batch:
-                boxes = torch.tensor(image_target['boxes'])
-                boxes = convert_bbox_yolo_to_pascal(boxes, [MAX_SIZE, MAX_SIZE])
-                labels = torch.tensor(image_target['class_labels'])
-                post_processed_targets.append({'boxes': boxes, 'labels': labels})
-
-        for batch, target_sizes in zip(predictions, image_sizes):
-            batch_logits, batch_boxes = batch[1], batch[2]
-            
-            # CRITICAL SAFETY CHECK: Ensure pred_boxes has exactly 4 dimensions
-            batch_boxes = torch.tensor(batch_boxes)
-            if batch_boxes.shape[-1] != 4:
-                print(f"EVALUATION SAFETY: pred_boxes has {batch_boxes.shape[-1]} dims, fixing to 4")
-                batch_boxes = batch_boxes[..., :4]
-            
-            output = SafeModelOutput(logits=torch.tensor(batch_logits), pred_boxes=batch_boxes)
-            
-            try:
-                post_processed_output = image_processor.post_process_object_detection(
-                    output, threshold=threshold, target_sizes=target_sizes
-                )
-                post_processed_predictions.extend(post_processed_output)
-            except Exception as e:
-                print(f"Error in post_process_object_detection: {e}")
-                print(f"pred_boxes shape: {batch_boxes.shape}")
-                # Create empty predictions for this batch to avoid crashing
-                empty_preds = [{'boxes': torch.empty(0, 4), 'scores': torch.empty(0), 'labels': torch.empty(0, dtype=torch.long)} for _ in range(len(target_sizes))]
-                post_processed_predictions.extend(empty_preds)
-
-        try:
-            metrics = mean_average_precision(post_processed_predictions, post_processed_targets)
-            metrics.pop('map_per_class', None)
-            return {k: v for k, v in metrics.items() if k.startswith('map')}
-        except Exception as e:
-            print(f"Error in mean_average_precision: {e}")
-            # Return zero metrics if evaluation fails
-            return {
-                'map': 0.0,
-                'map_50': 0.0,
-                'map_75': 0.0,
-                'map_small': 0.0,
-                'map_medium': 0.0,
-                'map_large': 0.0
-            }
-    
-    return partial(
-        safe_compute_metrics, image_processor=image_processor,
-        threshold=0.5, id2label={0: 'cancer'}
-    )
-
 def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
     """Test a saved Router MoE model."""
     config = load_config(config_path)
@@ -401,7 +318,6 @@ def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
         elif os.path.exists(safetensors_path):
             model_file = safetensors_path
             print(f"Loading saved model from: {model_file}")
-            # For safetensors, we need different loading
             from safetensors.torch import load_file
             state_dict = load_file(model_file)
             model.load_state_dict(state_dict)
@@ -431,8 +347,6 @@ def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
     print(f'Test dataset: {len(test_dataset)} samples')
     
     # Setup evaluation (same as test.py)
-    training_cfg = config.get('training', {})
-    
     import datetime
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"RouterMoE_Test_{DATASET_NAME}_{date_str}"
@@ -453,18 +367,18 @@ def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
         metric_for_best_model='eval_map_50',
         greater_is_better=True,
         fp16=torch.cuda.is_available(),
-        dataloader_num_workers=0,  # Use 0 for testing to avoid issues
+        dataloader_num_workers=0,
         gradient_accumulation_steps=2,
         remove_unused_columns=False,
     )
     
-    # Use the safe evaluation function
-    eval_compute_metrics_fn = get_safe_eval_compute_metrics_fn(image_processor)
+    # Use the same evaluation function as train.py
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
     
     trainer = Trainer(
         model=model,
         args=training_args,
-        eval_dataset=test_dataset,  # Add this line - use test_dataset as eval_dataset
+        eval_dataset=test_dataset,
         processing_class=image_processor,
         data_collator=collate_fn,
         compute_metrics=eval_compute_metrics_fn,
