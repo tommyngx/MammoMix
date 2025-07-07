@@ -307,7 +307,7 @@ def create_routing_dataset(config, image_processor, split='train', dataset_name=
     # The router will learn from object detection performance
     return dataset
 
-def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
+def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None, weight_dir=None):
     """Test a saved Router MoE model."""
     config = load_config(config_path)
     
@@ -320,13 +320,19 @@ def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Get weight_dir from config
-    weight_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
-    if not os.path.exists(weight_dir):
-        raise ValueError(f"Expert weights directory not found: {weight_dir}")
+    # Get weight_dir from argument or config - prioritize argument
+    if weight_dir is not None:
+        expert_weights_dir = weight_dir
+        print(f"Using expert weights from argument: {expert_weights_dir}")
+    else:
+        expert_weights_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
+        print(f"Using expert weights from config: {expert_weights_dir}")
+    
+    if not os.path.exists(expert_weights_dir):
+        raise ValueError(f"Expert weights directory not found: {expert_weights_dir}")
     
     print("Loading expert models...")
-    expert_models, expert_processors = load_expert_models(weight_dir, device)
+    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     
     # Use first processor for consistency
     image_processor = expert_processors[0]
@@ -426,13 +432,13 @@ def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
     
     return test_results
 
-def main(config_path, epoch=None, dataset=None, weight_moe2=None):
+def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=None):
     """Main training function following train.py structure exactly."""
     
     # If weight_moe2 is provided, only run testing
     if weight_moe2 is not None:
         print(f"Testing mode: Loading saved Router MoE model from {weight_moe2}")
-        return test_saved_moe_model(config_path, weight_moe2, dataset, epoch)
+        return test_saved_moe_model(config_path, weight_moe2, dataset, epoch, weight_dir)
     
     config = load_config(config_path)
     
@@ -452,13 +458,19 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Get weight_dir from config (instead of argument) - same pattern as train.py
-    weight_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
-    if not os.path.exists(weight_dir):
-        raise ValueError(f"Expert weights directory not found: {weight_dir}. Please add 'moe.expert_weights_dir' to your config.")
+    # Get weight_dir from argument or config - prioritize argument
+    if weight_dir is not None:
+        expert_weights_dir = weight_dir
+        print(f"Using expert weights from argument: {expert_weights_dir}")
+    else:
+        expert_weights_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
+        print(f"Using expert weights from config: {expert_weights_dir}")
+    
+    if not os.path.exists(expert_weights_dir):
+        raise ValueError(f"Expert weights directory not found: {expert_weights_dir}")
     
     print("Loading expert models...")
-    expert_models, expert_processors = load_expert_models(weight_dir, device)
+    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     
     # Use first processor for consistency (same as train.py approach)
     image_processor = expert_processors[0]
@@ -605,6 +617,7 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_moe2', type=str, default=None, help='Path to saved Router MoE model for testing only')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Path to directory containing expert model weights (overrides config)')
     args = parser.parse_args()
 
-    main(args.config, args.epoch, args.dataset, args.weight_moe2)
+    main(args.config, args.epoch, args.dataset, args.weight_moe2, args.weight_dir)
