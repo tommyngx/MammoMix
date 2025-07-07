@@ -303,8 +303,184 @@ def load_expert_models(weight_dir, device):
     
     return models, processors
 
+def debug_moe_vs_individual(config, device, dataset_name, expert_weights_dir, num_samples=5):
+    """Debug function to compare SimpleMoE vs Individual Expert outputs on same samples."""
+    print(f"\n=== DEBUG: SimpleMoE vs Individual Expert on {dataset_name} ===")
+    
+    # Load expert models
+    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
+    image_processor = expert_processors[0]
+    
+    # Load classifier
+    moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
+    classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
+    
+    if not os.path.exists(classifier_path):
+        classifier_final_path = os.path.join(moe_save_dir, 'classifier_final.pth')
+        if os.path.exists(classifier_final_path):
+            classifier_path = classifier_final_path
+        else:
+            raise FileNotFoundError(f"No classifier found in {moe_save_dir}")
+    
+    classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
+    classifier.load_state_dict(torch.load(classifier_path, map_location=device))
+    classifier.eval()
+    
+    # Create test dataset
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    
+    test_dataset = BreastCancerDataset(
+        split='test',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+    )
+    
+    # Get the correct expert for this dataset
+    dataset_map = {'CSAW': 0, 'DMID': 1, 'DDSM': 2}
+    expert_idx = dataset_map[dataset_name]
+    individual_expert = expert_models[expert_idx]
+    
+    # Create SimpleMoE
+    moe_model = SimpleMoE(expert_models, classifier, device).to(device)
+    moe_model.eval()
+    moe_model.reset_routing_stats()
+    
+    # Helper function to move labels to device
+    def move_labels_to_device(labels_list, target_device):
+        if labels_list is None:
+            return None
+        moved_labels = []
+        for label_dict in labels_list:
+            moved_dict = {}
+            for key, value in label_dict.items():
+                if isinstance(value, torch.Tensor):
+                    moved_dict[key] = value.to(target_device)
+                else:
+                    moved_dict[key] = value
+            moved_labels.append(moved_dict)
+        return moved_labels
+    
+    print(f"Testing on {num_samples} samples from {dataset_name}...")
+    
+    # Test on first few samples
+    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+    
+    sample_count = 0
+    total_differences = {
+        'logits_diff': 0.0,
+        'boxes_diff': 0.0,
+        'loss_diff': 0.0,
+        'routing_correct': 0
+    }
+    
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(test_loader):
+            if sample_count >= num_samples:
+                break
+                
+            pixel_values = batch['pixel_values'].to(device)
+            labels = batch['labels']
+            labels = move_labels_to_device(labels, device)
+            
+            print(f"\n--- Sample {sample_count + 1} ---")
+            print(f"Pixel values shape: {pixel_values.shape}")
+            
+            # 1. Individual Expert Forward
+            individual_expert.eval()
+            individual_output = individual_expert(pixel_values, labels=labels)
+            
+            # 2. SimpleMoE Forward 
+            moe_model.eval()
+            moe_output, routing_info = moe_model(pixel_values, labels=labels, return_routing=True)
+            
+            # 3. Analyze routing
+            expert_choice = routing_info['choices'][0].item()
+            routing_correct = (expert_choice == expert_idx)
+            total_differences['routing_correct'] += int(routing_correct)
+            
+            print(f"Expected expert: {expert_idx} ({dataset_name})")
+            print(f"Routed to expert: {expert_choice} ({moe_model.expert_names[expert_choice]})")
+            print(f"Routing correct: {routing_correct}")
+            
+            # 4. Compare outputs
+            if routing_correct:
+                # Compare logits
+                logits_diff = torch.abs(individual_output.logits - moe_output.logits).mean().item()
+                total_differences['logits_diff'] += logits_diff
+                print(f"Logits difference (mean abs): {logits_diff:.6f}")
+                
+                # Compare pred_boxes
+                boxes_diff = torch.abs(individual_output.pred_boxes - moe_output.pred_boxes).mean().item()
+                total_differences['boxes_diff'] += boxes_diff
+                print(f"Pred_boxes difference (mean abs): {boxes_diff:.6f}")
+                
+                # Compare loss
+                if individual_output.loss is not None and moe_output.loss is not None:
+                    loss_diff = abs(individual_output.loss.item() - moe_output.loss.item())
+                    total_differences['loss_diff'] += loss_diff
+                    print(f"Individual loss: {individual_output.loss.item():.6f}")
+                    print(f"MoE loss: {moe_output.loss.item():.6f}")
+                    print(f"Loss difference: {loss_diff:.6f}")
+                
+                # Check tensor properties
+                print(f"Individual logits shape: {individual_output.logits.shape}")
+                print(f"MoE logits shape: {moe_output.logits.shape}")
+                print(f"Individual boxes shape: {individual_output.pred_boxes.shape}")
+                print(f"MoE boxes shape: {moe_output.pred_boxes.shape}")
+                
+                # Check if tensors are identical (should be for correct routing)
+                logits_identical = torch.allclose(individual_output.logits, moe_output.logits, atol=1e-6)
+                boxes_identical = torch.allclose(individual_output.pred_boxes, moe_output.pred_boxes, atol=1e-6)
+                print(f"Logits identical (atol=1e-6): {logits_identical}")
+                print(f"Boxes identical (atol=1e-6): {boxes_identical}")
+                
+                if not logits_identical or not boxes_identical:
+                    print("⚠️  WARNING: Outputs should be identical when routing is correct!")
+            else:
+                print("❌ Routing incorrect - cannot compare outputs meaningfully")
+            
+            sample_count += 1
+    
+    # Print summary
+    print(f"\n=== DEBUG Summary ({num_samples} samples) ===")
+    print(f"Routing accuracy: {total_differences['routing_correct']}/{num_samples} = {total_differences['routing_correct']/num_samples*100:.1f}%")
+    
+    if total_differences['routing_correct'] > 0:
+        correct_samples = total_differences['routing_correct']
+        print(f"Average differences (for correctly routed samples):")
+        print(f"  Logits difference: {total_differences['logits_diff']/correct_samples:.8f}")
+        print(f"  Boxes difference: {total_differences['boxes_diff']/correct_samples:.8f}")
+        print(f"  Loss difference: {total_differences['loss_diff']/correct_samples:.8f}")
+        
+        if total_differences['logits_diff']/correct_samples < 1e-6 and total_differences['boxes_diff']/correct_samples < 1e-6:
+            print("✅ Outputs are virtually identical - SimpleMoE working correctly!")
+        else:
+            print("⚠️  Outputs differ - there may be an issue with SimpleMoE implementation")
+    else:
+        print("❌ No correctly routed samples - classifier needs debugging")
+    
+    # Final routing stats
+    final_stats = moe_model.get_routing_stats()
+    print(f"\nFinal routing distribution:")
+    for expert_name, usage in final_stats.items():
+        print(f"  {expert_name}: {usage*100:.1f}%")
+
 def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     """Complete evaluation of SimpleMoE using trainer.evaluate exactly like test.py."""
+    # FIRST: Run debug to check for issues
+    print("\n" + "="*60)
+    print("DEBUGGING SimpleMoE vs Individual Expert")
+    print("="*60)
+    try:
+        debug_moe_vs_individual(config, device, dataset_name, expert_weights_dir, num_samples=10)
+    except Exception as e:
+        print(f"Debug failed: {e}")
+        import traceback
+        traceback.print_exc()
+    
     # Load components silently
     expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     image_processor = expert_processors[0]
