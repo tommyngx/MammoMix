@@ -130,26 +130,33 @@ class ValidatedMoEObjectDetectionModel(torch.nn.Module):
         super().__init__()
         self.moe_model = moe_model
         self.reference_processor = reference_processor
-        self.debug_count = 0
         
     def forward(self, pixel_values, labels=None):
         # Get MoE output - this should now return the corrected YolosObjectDetectionOutput
         moe_output = self.moe_model(pixel_values, labels=labels)
         
-        self.debug_count += 1
-        if self.debug_count <= 3 or self.debug_count % 10 == 0:
-            print(f"DEBUG Forward #{self.debug_count}: input shape {pixel_values.shape}, moe_output type {type(moe_output)}")
-            if hasattr(moe_output, 'pred_boxes'):
-                print(f"DEBUG Forward #{self.debug_count}: pred_boxes shape {moe_output.pred_boxes.shape}")
-            if hasattr(moe_output, 'loss'):
-                print(f"DEBUG Forward #{self.debug_count}: loss = {moe_output.loss}")
-        
         # TEMPORARY FIX: Always ensure loss is present regardless of labels
         # The Trainer evaluation expects loss to always be present
         moe_output.loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=False)
         
-        # Since train_moe.py now returns proper YolosObjectDetectionOutput, 
-        # we should be able to return it directly
+        # CRITICAL FIX: Ensure pred_boxes has exactly 4 dimensions for post-processing
+        if moe_output.pred_boxes.shape[-1] != 4:
+            print(f"WARNING: Fixing pred_boxes from {moe_output.pred_boxes.shape} to 4 dims")
+            if moe_output.pred_boxes.shape[-1] > 4:
+                moe_output.pred_boxes = moe_output.pred_boxes[..., :4]
+            else:
+                # Pad with zeros if less than 4
+                batch_size, num_queries = moe_output.pred_boxes.shape[:2]
+                padding_size = 4 - moe_output.pred_boxes.shape[-1]
+                padding = torch.zeros(batch_size, num_queries, padding_size,
+                                    device=moe_output.pred_boxes.device, 
+                                    dtype=moe_output.pred_boxes.dtype)
+                moe_output.pred_boxes = torch.cat([moe_output.pred_boxes, padding], dim=-1)
+        
+        # Ensure tensors are contiguous
+        moe_output.pred_boxes = moe_output.pred_boxes.contiguous()
+        moe_output.logits = moe_output.logits.contiguous()
+        
         return moe_output
 
 def test_model_output_format(model, test_dataset, device, model_name="Model"):
@@ -206,28 +213,6 @@ def evaluate_model(model, test_dataset, image_processor, config, device, model_n
                 print(f"ISSUE: {model_name} pred_boxes wrong shape: {output.pred_boxes.shape}")
             else:
                 print(f"{model_name} output validation: pred_boxes shape OK {output.pred_boxes.shape}")
-            
-            # For MoE, do additional validation
-            if "moe" in model_name.lower():
-                print(f"MoE additional validation:")
-                print(f"  pred_boxes dtype: {output.pred_boxes.dtype}")
-                print(f"  pred_boxes is_contiguous: {output.pred_boxes.is_contiguous()}")
-                print(f"  pred_boxes device: {output.pred_boxes.device}")
-                print(f"  logits shape: {output.logits.shape}")
-                print(f"  logits dtype: {output.logits.dtype}")
-                
-                # Test the post-processing function directly
-                try:
-                    test_target_sizes = torch.tensor([[640, 640]], device=device)
-                    post_processed = image_processor.post_process_object_detection(
-                        output, threshold=0.1, target_sizes=test_target_sizes
-                    )
-                    print(f"  Direct post-processing test: SUCCESS")
-                except Exception as e:
-                    print(f"  Direct post-processing test: FAILED - {e}")
-                    # Try to understand what's wrong
-                    print(f"    pred_boxes sample: {output.pred_boxes[0, 0, :]}")
-                    print(f"    pred_boxes requires_grad: {output.pred_boxes.requires_grad}")
         
         # Setup trainer
         training_cfg = config.get('training', {})
@@ -481,29 +466,16 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                 debug_batch = next(iter(debug_loader))
                 
                 with torch.no_grad():
-                    # Expert raw output
-                    expert_output = expert_model(debug_batch['pixel_values'].to(device))
-                    print(f"Expert raw output:")
-                    print(f"  Logits shape: {expert_output.logits.shape}")
-                    print(f"  Pred boxes shape: {expert_output.pred_boxes.shape}")
-                    print(f"  Pred boxes last dim: {expert_output.pred_boxes.shape[-1]}")
-                    print(f"  Expert pred_boxes[0,0,:]: {expert_output.pred_boxes[0, 0, :]}")
-                    
                     # Raw MoE output
                     raw_moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
                     raw_moe_output = raw_moe_detector(debug_batch['pixel_values'].to(device))
-                    print(f"Raw MoE output:")
-                    print(f"  Logits shape: {raw_moe_output.logits.shape}")
-                    print(f"  Pred boxes shape: {raw_moe_output.pred_boxes.shape}")
-                    print(f"  Pred boxes last dim: {raw_moe_output.pred_boxes.shape[-1]}")
-                    print(f"  Raw MoE pred_boxes[0,0,:]: {raw_moe_output.pred_boxes[0, 0, :]}")
+                    print(f"Raw MoE output: pred_boxes shape {raw_moe_output.pred_boxes.shape}")
                     
                     # Check if the issue is in the raw MoE output
                     if raw_moe_output.pred_boxes.shape[-1] != 4:
                         print(f"ISSUE FOUND: Raw MoE pred_boxes has {raw_moe_output.pred_boxes.shape[-1]} dimensions instead of 4")
-                        print(f"Raw MoE pred_boxes sample values: {raw_moe_output.pred_boxes[0, 0, :8] if raw_moe_output.pred_boxes.shape[-1] > 8 else raw_moe_output.pred_boxes[0, 0, :]}")
                 
-                # Create validated wrapper - now simplified since train_moe.py handles the formatting
+                # Create validated wrapper
                 moe_detector = ValidatedMoEObjectDetectionModel(
                     MoEObjectDetectionModel(integrated_moe), 
                     image_processor
@@ -512,11 +484,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                 # Test wrapped output
                 with torch.no_grad():
                     wrapped_moe_output = moe_detector(debug_batch['pixel_values'].to(device))
-                    print(f"Direct MoE output:")
-                    print(f"  Logits shape: {wrapped_moe_output.logits.shape}")
-                    print(f"  Pred boxes shape: {wrapped_moe_output.pred_boxes.shape}")
-                    print(f"  Pred boxes last dim: {wrapped_moe_output.pred_boxes.shape[-1]}")
-                    print(f"  Direct MoE pred_boxes[0,0,:]: {wrapped_moe_output.pred_boxes[0, 0, :]}")
+                    print(f"Validated MoE output: pred_boxes shape {wrapped_moe_output.pred_boxes.shape}")
                 
                 # Test post-processing with the wrapped model
                 if not test_post_processing(moe_detector, test_dataset, image_processor, device):
