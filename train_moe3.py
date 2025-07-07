@@ -267,10 +267,10 @@ def load_expert_models(weight_dir, device):
     
     return models, processors
 
-def calculate_map_metrics(predictions, targets, image_processor, MAX_SIZE=640):
+def calculate_map_metrics(predictions, targets, image_processor, device, MAX_SIZE=640):
     """
     Calculate mAP metrics using torchmetrics like evaluation.py.
-    This follows the exact same pattern as evaluation.py compute_metrics function.
+    FIXED: Proper device handling to avoid device mismatch errors.
     """
     try:
         from torchmetrics.functional.detection.map import mean_average_precision
@@ -280,33 +280,35 @@ def calculate_map_metrics(predictions, targets, image_processor, MAX_SIZE=640):
             """Convert YOLO format to Pascal VOC format like evaluation.py."""
             boxes = center_to_corners_format(boxes)
             height, width = image_size
-            boxes = boxes * torch.tensor([[width, height, width, height]])
+            boxes = boxes * torch.tensor([[width, height, width, height]], device=boxes.device)
             return boxes
         
         # Prepare data exactly like evaluation.py
         post_processed_targets = []
         post_processed_predictions = []
         
-        # Process targets (ground truth)
+        # Process targets (ground truth) - FIXED: Ensure all on same device
         for target in targets:
             if target and 'boxes' in target and 'class_labels' in target:
-                boxes = torch.tensor(target['boxes'])
+                # Move to device and convert properly
+                boxes = target['boxes'].clone().detach().to(device) if torch.is_tensor(target['boxes']) else torch.tensor(target['boxes'], device=device)
+                labels = target['class_labels'].clone().detach().to(device) if torch.is_tensor(target['class_labels']) else torch.tensor(target['class_labels'], device=device)
+                
                 boxes = convert_bbox_yolo_to_pascal(boxes, [MAX_SIZE, MAX_SIZE])
-                labels = torch.tensor(target['class_labels'])
                 post_processed_targets.append({'boxes': boxes, 'labels': labels})
             else:
-                # Empty target
+                # Empty target - ensure on correct device
                 post_processed_targets.append({
-                    'boxes': torch.zeros((0, 4)), 
-                    'labels': torch.tensor([], dtype=torch.long)
+                    'boxes': torch.zeros((0, 4), device=device), 
+                    'labels': torch.tensor([], dtype=torch.long, device=device)
                 })
         
-        # Process predictions exactly like evaluation.py
+        # Process predictions exactly like evaluation.py - FIXED: Device handling
         for pred in predictions:
             if hasattr(pred, 'logits') and hasattr(pred, 'pred_boxes'):
-                # Get logits and boxes from model output
-                logits = pred.logits  # Shape: (batch_size, num_queries, num_classes)
-                pred_boxes = pred.pred_boxes  # Shape: (batch_size, num_queries, 4)
+                # Get logits and boxes from model output - ensure on device
+                logits = pred.logits.to(device)  # Shape: (batch_size, num_queries, num_classes)
+                pred_boxes = pred.pred_boxes.to(device)  # Shape: (batch_size, num_queries, 4)
                 
                 # Process each sample in the batch
                 for i in range(logits.shape[0]):
@@ -321,50 +323,89 @@ def calculate_map_metrics(predictions, targets, image_processor, MAX_SIZE=640):
                         logits: torch.Tensor
                         pred_boxes: torch.Tensor
                     
-                    # Create model output for post-processing
+                    # Create model output for post-processing - ensure on device
                     output = ModelOutput(
-                        logits=sample_logits.unsqueeze(0),  # Add batch dim back
-                        pred_boxes=sample_boxes.unsqueeze(0)  # Add batch dim back
+                        logits=sample_logits.unsqueeze(0).to(device),  # Add batch dim back
+                        pred_boxes=sample_boxes.unsqueeze(0).to(device)  # Add batch dim back
                     )
                     
-                    # Target size for post-processing
-                    target_sizes = torch.tensor([[MAX_SIZE, MAX_SIZE]])
+                    # Target size for post-processing - ensure on device
+                    target_sizes = torch.tensor([[MAX_SIZE, MAX_SIZE]], device=device)
                     
                     # Post-process using image_processor like evaluation.py
                     post_processed_output = image_processor.post_process_object_detection(
                         output, threshold=0.5, target_sizes=target_sizes
                     )
                     
-                    # Add to predictions list
+                    # Add to predictions list - ensure all tensors on device
                     if post_processed_output:
-                        post_processed_predictions.append(post_processed_output[0])
-                    else:
-                        # Empty prediction
+                        pred_result = post_processed_output[0]
+                        # Ensure all outputs are on the correct device
                         post_processed_predictions.append({
-                            'boxes': torch.zeros((0, 4)),
-                            'scores': torch.tensor([]),
-                            'labels': torch.tensor([], dtype=torch.long)
+                            'boxes': pred_result['boxes'].to(device) if 'boxes' in pred_result else torch.zeros((0, 4), device=device),
+                            'scores': pred_result['scores'].to(device) if 'scores' in pred_result else torch.tensor([], device=device),
+                            'labels': pred_result['labels'].to(device) if 'labels' in pred_result else torch.tensor([], dtype=torch.long, device=device)
+                        })
+                    else:
+                        # Empty prediction - ensure on correct device
+                        post_processed_predictions.append({
+                            'boxes': torch.zeros((0, 4), device=device),
+                            'scores': torch.tensor([], device=device),
+                            'labels': torch.tensor([], dtype=torch.long, device=device)
                         })
             else:
-                # Handle single sample prediction without batch dimension
+                # Handle single sample prediction without batch dimension - ensure on device
                 post_processed_predictions.append({
-                    'boxes': torch.zeros((0, 4)),
-                    'scores': torch.tensor([]),
-                    'labels': torch.tensor([], dtype=torch.long)
+                    'boxes': torch.zeros((0, 4), device=device),
+                    'scores': torch.tensor([], device=device),
+                    'labels': torch.tensor([], dtype=torch.long, device=device)
                 })
         
+        # VERIFICATION: Ensure all tensors are on the same device before calling torchmetrics
+        print(f"Device verification before mAP calculation:")
+        print(f"  Number of predictions: {len(post_processed_predictions)}")
+        print(f"  Number of targets: {len(post_processed_targets)}")
+        
+        # Move all to CPU for torchmetrics compatibility
+        cpu_predictions = []
+        cpu_targets = []
+        
+        for pred in post_processed_predictions:
+            cpu_pred = {}
+            for key, value in pred.items():
+                if torch.is_tensor(value):
+                    cpu_pred[key] = value.cpu()
+                else:
+                    cpu_pred[key] = value
+            cpu_predictions.append(cpu_pred)
+        
+        for target in post_processed_targets:
+            cpu_target = {}
+            for key, value in target.items():
+                if torch.is_tensor(value):
+                    cpu_target[key] = value.cpu()
+                else:
+                    cpu_target[key] = value
+            cpu_targets.append(cpu_target)
+        
         # Calculate mAP using torchmetrics exactly like evaluation.py
-        metrics = mean_average_precision(post_processed_predictions, post_processed_targets)
+        print("Calculating mAP with torchmetrics...")
+        metrics = mean_average_precision(cpu_predictions, cpu_targets)
         
         # Remove unwanted metrics like evaluation.py
         if 'map_per_class' in metrics:
             metrics.pop('map_per_class')
         
         # Return only mAP metrics like evaluation.py
-        return {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items() if k.startswith('map')}
+        result = {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items() if k.startswith('map')}
+        print(f"mAP calculation successful: {result}")
+        return result
         
     except Exception as e:
         print(f"torchmetrics mAP calculation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        
         # Fallback to simple calculation
         return {
             'map': 0.0,
@@ -399,7 +440,7 @@ def run_inference_and_calculate_map(model, test_dataset, image_processor, device
             pixel_values = batch['pixel_values'].to(device)
             labels = batch['labels']
             
-            # Move labels to device
+            # Move labels to device properly
             if labels:
                 for label_dict in labels:
                     for key, value in label_dict.items():
@@ -413,8 +454,8 @@ def run_inference_and_calculate_map(model, test_dataset, image_processor, device
             all_predictions.append(output)
             all_targets.extend(labels if labels else [{}])
     
-    # Calculate mAP metrics using torchmetrics
-    map_metrics = calculate_map_metrics(all_predictions, all_targets, image_processor)
+    # Calculate mAP metrics using torchmetrics - FIXED: Pass device
+    map_metrics = calculate_map_metrics(all_predictions, all_targets, image_processor, device)
     
     return map_metrics
 
