@@ -43,12 +43,13 @@ def load_config(config_path):
 class ImageRouterMoE(nn.Module):
     """
     Router-based MoE that learns to route images to the best expert.
-    IMPROVED: Better architecture and learning signals
+    FIXED: Proper per-sample expert selection and monitoring
     """
     def __init__(self, expert_models, device):
         super().__init__()
         self.experts = nn.ModuleList(expert_models)  # [CSAW, DMID, DDSM]
         self.device = device
+        self.expert_names = ['CSAW', 'DMID', 'DDSM']  # For tracking
         
         # IMPROVED router network: Use image features + metadata
         self.router = nn.Sequential(
@@ -76,13 +77,18 @@ class ImageRouterMoE(nn.Module):
                 param.requires_grad = False
         
         print(f"Router MoE initialized with {len(self.experts)} frozen experts")
+        print(f"Expert mapping: 0=CSAW, 1=DMID, 2=DDSM")
         
         # Count parameters
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f'Total parameters: {total_params / 1e6:.2f}M')
-        print(f'Trainable parameters: {trainable_params:.0f} (router only - ULTRA SIMPLE)')
-    
+        print(f'Trainable parameters: {trainable_params:.0f} (router only)')
+        
+        # Add routing statistics
+        self.routing_counts = torch.zeros(3, device=device)  # Track expert usage
+        self.total_routed = 0
+
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         """Enable gradient checkpointing for compatibility with Transformers Trainer."""
         pass
@@ -94,7 +100,7 @@ class ImageRouterMoE(nn.Module):
     def forward(self, pixel_values, labels=None, return_routing=False):
         """
         Forward pass: route each image to best expert and return expert's output.
-        IMPROVED: Router learns to choose the BEST expert based on performance
+        FIXED: Proper per-sample expert selection
         """
         batch_size = pixel_values.shape[0]
         
@@ -103,42 +109,47 @@ class ImageRouterMoE(nn.Module):
         routing_probs = F.softmax(routing_logits, dim=1)
         expert_choices = torch.argmax(routing_probs, dim=1)  # Shape: (batch_size,)
         
-        # IMPROVED routing loss: Learn to choose the BEST expert
-        routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-        if labels is not None:
-            # Get loss from ALL experts to find the best one
-            expert_losses = []
-            expert_outputs_list = []
-            
-            for expert_idx in range(len(self.experts)):
-                with torch.no_grad():
-                    expert_output = self.experts[expert_idx](pixel_values, labels=labels)
-                    expert_output = self._fix_expert_output_dimensions(expert_output)
-                    expert_outputs_list.append(expert_output)
-                    
-                    # Get the actual loss for this expert
-                    if hasattr(expert_output, 'loss') and expert_output.loss is not None:
-                        expert_losses.append(expert_output.loss)
-            
-            if len(expert_losses) > 0:
-                # Find BEST expert (lowest loss) for each sample
-                expert_losses_tensor = torch.stack(expert_losses)  # Shape: (n_experts,)
-                
-                # For each sample, find which expert performs best
-                best_expert_indices = torch.argmin(expert_losses_tensor.unsqueeze(0).expand(batch_size, -1), dim=1)
-                
-                # SUPERVISION: Train router to choose the best expert
-                routing_loss = F.cross_entropy(routing_logits, best_expert_indices)
-                
-                # Optional: Add small diversity loss to prevent collapse
-                expert_usage = routing_probs.mean(dim=0)
-                target_usage = torch.ones_like(expert_usage) / len(self.experts)
-                diversity_loss = F.mse_loss(expert_usage, target_usage)
-                
-                # Combine: strong supervision + weak diversity
-                routing_loss = routing_loss + 0.1 * diversity_loss
+        # Update routing statistics
+        for choice in expert_choices:
+            self.routing_counts[choice] += 1
+        self.total_routed += batch_size
         
-        # For batch processing, group by expert choice
+        # FIXED routing loss: Learn to choose the BEST expert PER SAMPLE
+        routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        if labels is not None and self.training:
+            # Evaluate each expert on each sample individually
+            best_expert_per_sample = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+            
+            for sample_idx in range(batch_size):
+                sample_pixel = pixel_values[sample_idx:sample_idx+1]  # Shape: (1, C, H, W)
+                sample_label = [labels[sample_idx]] if labels is not None else None
+                
+                sample_losses = []
+                for expert_idx in range(len(self.experts)):
+                    with torch.no_grad():
+                        expert_output = self.experts[expert_idx](sample_pixel, labels=sample_label)
+                        expert_output = self._fix_expert_output_dimensions(expert_output)
+                        
+                        if hasattr(expert_output, 'loss') and expert_output.loss is not None:
+                            sample_losses.append(expert_output.loss.item())
+                        else:
+                            sample_losses.append(float('inf'))  # Large penalty if expert fails
+                
+                # Find best expert for this sample
+                best_expert_per_sample[sample_idx] = torch.argmin(torch.tensor(sample_losses))
+            
+            # Train router to predict the best expert for each sample
+            routing_loss = F.cross_entropy(routing_logits, best_expert_per_sample)
+            
+            # Add load balancing to encourage using all experts
+            expert_usage = routing_probs.mean(dim=0)
+            uniform_usage = torch.ones_like(expert_usage) / len(self.experts)
+            balance_loss = F.mse_loss(expert_usage, uniform_usage)
+            
+            # Combine losses
+            routing_loss = routing_loss + 0.1 * balance_loss
+        
+        # Execute routing: Group samples by expert choice
         expert_groups = {}
         for i in range(batch_size):
             expert_idx = expert_choices[i].item()
@@ -146,19 +157,44 @@ class ImageRouterMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        # Get the first expert output to determine tensor shapes
-        first_expert_idx = list(expert_groups.keys())[0]
-        first_sample_indices = expert_groups[first_expert_idx]
-        first_expert_pixel_values = pixel_values[first_sample_indices]
-        first_expert_labels = None
-        if labels is not None:
-            first_expert_labels = [labels[i] for i in first_sample_indices]
+        # Print routing distribution (for monitoring)
+        if not self.training and self.total_routed % 100 == 0:  # Every 100 samples during eval
+            usage_pct = (self.routing_counts / self.total_routed * 100).cpu().numpy()
+            print(f"Routing stats: CSAW={usage_pct[0]:.1f}%, DMID={usage_pct[1]:.1f}%, DDSM={usage_pct[2]:.1f}%")
         
-        with torch.no_grad():
-            reference_output = self.experts[first_expert_idx](first_expert_pixel_values, labels=first_expert_labels)
-            reference_output = self._fix_expert_output_dimensions(reference_output)
+        # Get expert outputs for each group
+        batch_outputs = {}
+        total_detection_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         
-        # Initialize output tensors
+        for expert_idx, sample_indices in expert_groups.items():
+            expert_pixel_values = pixel_values[sample_indices]
+            expert_labels = None
+            if labels is not None:
+                expert_labels = [labels[i] for i in sample_indices]
+            
+            # Get expert output (frozen expert, no gradients needed)
+            with torch.no_grad():
+                expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
+                expert_output = self._fix_expert_output_dimensions(expert_output)
+            
+            batch_outputs[expert_idx] = {
+                'output': expert_output,
+                'indices': sample_indices
+            }
+            
+            # Accumulate detection loss
+            if hasattr(expert_output, 'loss') and expert_output.loss is not None:
+                weight = len(sample_indices) / batch_size
+                total_detection_loss = total_detection_loss + expert_output.loss * weight
+        
+        # Reconstruct batch outputs in original order
+        if not batch_outputs:
+            raise RuntimeError("No expert outputs generated")
+        
+        first_expert_idx = list(batch_outputs.keys())[0]
+        reference_output = batch_outputs[first_expert_idx]['output']
+        
+        # Initialize batch tensors
         num_queries = reference_output.logits.shape[1]
         num_classes = reference_output.logits.shape[2]
         
@@ -166,46 +202,28 @@ class ImageRouterMoE(nn.Module):
                                  device=pixel_values.device, dtype=reference_output.logits.dtype)
         batch_pred_boxes = torch.zeros(batch_size, num_queries, 4, 
                                      device=pixel_values.device, dtype=reference_output.pred_boxes.dtype)
-        batch_loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=True)
         batch_last_hidden_state = None
-        
-        # Use the reference output for the first group
-        batch_logits[first_sample_indices] = reference_output.logits
-        batch_pred_boxes[first_sample_indices] = reference_output.pred_boxes
-        
-        if hasattr(reference_output, 'loss') and reference_output.loss is not None:
-            batch_loss = batch_loss + reference_output.loss * len(first_sample_indices) / batch_size
         
         if hasattr(reference_output, 'last_hidden_state') and reference_output.last_hidden_state is not None:
             batch_last_hidden_state = torch.zeros(batch_size, reference_output.last_hidden_state.shape[1], 
                                                  reference_output.last_hidden_state.shape[2], 
                                                  device=pixel_values.device, dtype=reference_output.last_hidden_state.dtype)
-            batch_last_hidden_state[first_sample_indices] = reference_output.last_hidden_state
         
-        # Process remaining expert groups
-        remaining_groups = {k: v for k, v in expert_groups.items() if k != first_expert_idx}
-        for expert_idx, sample_indices in remaining_groups.items():
-            expert_pixel_values = pixel_values[sample_indices]
-            expert_labels = None
-            if labels is not None:
-                expert_labels = [labels[i] for i in sample_indices]
-            
-            with torch.no_grad():
-                expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-                expert_output = self._fix_expert_output_dimensions(expert_output)
+        # Fill batch tensors with expert outputs
+        for expert_idx, group_data in batch_outputs.items():
+            expert_output = group_data['output']
+            sample_indices = group_data['indices']
             
             batch_logits[sample_indices] = expert_output.logits
             batch_pred_boxes[sample_indices] = expert_output.pred_boxes
             
-            if hasattr(expert_output, 'loss') and expert_output.loss is not None:
-                batch_loss = batch_loss + expert_output.loss * len(sample_indices) / batch_size
-            
             if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
                 batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
         
-        # Add STRONG routing loss to total loss
+        # Combine detection loss and routing loss
+        total_loss = total_detection_loss
         if labels is not None and routing_loss.item() > 0:
-            batch_loss = batch_loss + 0.5 * routing_loss  # Increased weight for learning
+            total_loss = total_loss + 2.0 * routing_loss  # Strong routing supervision
         
         # Final safety check
         assert batch_pred_boxes.shape[-1] == 4, f"pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
@@ -215,14 +233,20 @@ class ImageRouterMoE(nn.Module):
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
         
         combined_output = YolosObjectDetectionOutput(
-            loss=batch_loss,
+            loss=total_loss,
             logits=batch_logits,
             pred_boxes=batch_pred_boxes,
             last_hidden_state=batch_last_hidden_state
         )
         
         if return_routing:
-            return combined_output, F.softmax(routing_logits, dim=1), expert_choices
+            routing_info = {
+                'probs': routing_probs,
+                'choices': expert_choices,
+                'groups': expert_groups,
+                'stats': self.get_routing_stats()
+            }
+            return combined_output, routing_info
         else:
             return combined_output
     
@@ -249,6 +273,22 @@ class ImageRouterMoE(nn.Module):
             )
             return fixed_output
         return expert_output
+    
+    def get_routing_stats(self):
+        """Get current routing statistics."""
+        if self.total_routed == 0:
+            return {name: 0.0 for name in self.expert_names}
+        
+        stats = {}
+        usage = (self.routing_counts / self.total_routed).cpu().numpy()
+        for i, name in enumerate(self.expert_names):
+            stats[name] = float(usage[i])
+        return stats
+    
+    def reset_routing_stats(self):
+        """Reset routing statistics."""
+        self.routing_counts.zero_()
+        self.total_routed = 0
 
 def load_expert_models(weight_dir, device):
     """Load the 3 expert models (similar to train.py model loading)."""
@@ -558,17 +598,17 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"RouterMoE_{DATASET_NAME}_{date_str}"
     
-    # ULTRA SIMPLE training arguments for very fast convergence
+    # IMPROVED training arguments for better router learning
     training_args = TrainingArguments(
         output_dir=output_dir,  # Save to weight_dir
         run_name=run_name,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
-        learning_rate=1e-3,  # HIGH learning rate for simple router
-        weight_decay=0.0,    # NO weight decay for simple model
-        warmup_ratio=0.0,    # NO warmup needed
-        lr_scheduler_type='constant',  # CONSTANT learning rate
+        learning_rate=5e-4,  # Moderate learning rate for router training
+        weight_decay=1e-5,   # Small weight decay
+        warmup_ratio=0.1,    # Warmup for stable training
+        lr_scheduler_type='cosine',  # Cosine annealing
         lr_scheduler_kwargs={},
         eval_do_concat_batches=eval_do_concat_batches,
         disable_tqdm=False,  # Keep progress bars enabled
@@ -576,7 +616,8 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,   # ONLY keep best model
-        logging_strategy="epoch",  # Log only at epoch level
+        logging_strategy="steps",  # Log more frequently
+        logging_steps=100,    # Log every 100 steps
         report_to=[],  # Disable external logging to reduce noise
         load_best_model_at_end=True,  # Automatically load best model
         metric_for_best_model=metric_for_best_model,
@@ -584,11 +625,11 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         fp16=torch.cuda.is_available(),
         dataloader_num_workers=0,  # REDUCED to 0 to avoid tqdm conflicts
         dataloader_pin_memory=False,  # Disable pin memory to fix tqdm
-        gradient_accumulation_steps=1,  # NO accumulation
+        gradient_accumulation_steps=2,  # Accumulation for stable gradients
         remove_unused_columns=remove_unused_columns,
     )
     
-    # Evaluation metrics (same as train.py)
+    # Use the same evaluation function as train.py
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
     
     # Training (exactly like train.py)
@@ -610,12 +651,17 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     print(f"Best model will be automatically saved to: {output_dir}")
     
     try:
+        print(f"\n=== Training Router MoE ===")
+        print("Router will learn to select the best expert for each mammogram image")
+        
         trainer.train()
         
-        # NO MANUAL SAVE - Trainer automatically saves best model due to:
-        # - save_strategy="epoch"
-        # - save_total_limit=1 (only keep best)
-        # - load_best_model_at_end=True
+        # Print final routing statistics
+        print("\n=== Final Router Analysis ===")
+        final_stats = model.get_routing_stats()
+        print("Expert usage distribution:")
+        for expert_name, usage in final_stats.items():
+            print(f"  {expert_name}: {usage*100:.1f}%")
         
         # Evaluate on test dataset (same as train.py structure)
         print("\n=== Evaluating on test dataset ===")
