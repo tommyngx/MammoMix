@@ -318,7 +318,6 @@ def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir,
                 integrated_moe = create_moe_model(models_list, moe_model_path, device)
                 
                 # Create MoE - use direct MoEObjectDetectionModel without additional wrapper
-                #integrated_moe = create_moe_model(models_list, moe_model, device)
                 moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
                 
                 # Quick validation test
@@ -343,13 +342,14 @@ def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir,
                     print(f"❌ Post-processing failed: {e}")
                     return
                 
-                # Use EXACT same evaluation setup as test.py
+                # Load config for training arguments (was missing)
+                config = load_config('configs/train_config.yaml')  # Add this line
                 training_cfg = config.get('training', {})
                 
                 # Copy exact TrainingArguments from test.py
                 import datetime
                 date_str = datetime.datetime.now().strftime("%d%m%y")
-                run_name = f"MoE_{DATASET_NAME}_{date_str}"
+                run_name = f"MoE_{dataset_name}_{date_str}"
                 
                 training_args = TrainingArguments(
                     output_dir='./temp_moe_output',
