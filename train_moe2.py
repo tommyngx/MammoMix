@@ -273,8 +273,108 @@ def create_routing_dataset(config, image_processor, split='train', dataset_name=
     # The router will learn from object detection performance
     return dataset
 
-def main(config_path, epoch=None, dataset=None):
+def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
+    """Test a saved Router MoE model."""
+    config = load_config(config_path)
+    
+    # Use dataset from argument or config (same as train.py)
+    DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    
+    # Setup device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Get weight_dir from config
+    weight_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
+    if not os.path.exists(weight_dir):
+        raise ValueError(f"Expert weights directory not found: {weight_dir}")
+    
+    print("Loading expert models...")
+    expert_models, expert_processors = load_expert_models(weight_dir, device)
+    
+    # Use first processor for consistency
+    image_processor = expert_processors[0]
+    
+    # Create Router MoE model
+    model = ImageRouterMoE(expert_models, device).to(device)
+    
+    # Load saved weights
+    print(f"Loading saved model from: {model_path}")
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    
+    # Create test dataset
+    test_dataset = BreastCancerDataset(
+        split='test',
+        splits_dir=SPLITS_DIR,
+        dataset_name=DATASET_NAME,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
+    print(f'Test dataset: {len(test_dataset)} samples')
+    
+    # Setup evaluation (same as test.py)
+    training_cfg = config.get('training', {})
+    
+    import datetime
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"RouterMoE_Test_{DATASET_NAME}_{date_str}"
+    
+    training_args = TrainingArguments(
+        output_dir='./temp_test_output',
+        run_name=run_name,
+        per_device_eval_batch_size=8,
+        eval_do_concat_batches=False,
+        disable_tqdm=False,
+        logging_dir="./logs",
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=1,
+        logging_strategy="epoch",
+        report_to=[],  # Disable external loggers for testing
+        load_best_model_at_end=True,
+        metric_for_best_model='eval_map_50',
+        greater_is_better=True,
+        fp16=torch.cuda.is_available(),
+        dataloader_num_workers=0,  # Use 0 for testing to avoid issues
+        gradient_accumulation_steps=2,
+        remove_unused_columns=False,
+    )
+    
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    print("\n=== Testing Router MoE model ===")
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    
+    # Print test results (exactly like train.py and test.py)
+    print("\n=== Test Results ===")
+    for key, value in test_results.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+    
+    return test_results
+
+def main(config_path, epoch=None, dataset=None, weight_moe2=None):
     """Main training function following train.py structure exactly."""
+    
+    # If weight_moe2 is provided, only run testing
+    if weight_moe2 is not None:
+        print(f"Testing mode: Loading saved Router MoE model from {weight_moe2}")
+        return test_saved_moe_model(config_path, weight_moe2, dataset, epoch)
+    
     config = load_config(config_path)
     
     # Use dataset from argument or config (same as train.py)
@@ -399,40 +499,53 @@ def main(config_path, epoch=None, dataset=None):
     )
     
     print("\n=== Training now ===")
-    trainer.train()
     
-    # Save model (same as train.py)
+    # SAVE MODEL BEFORE TRAINING STARTS to avoid losing progress
     date_str = datetime.datetime.now().strftime("%d%m%y")
     save_path = f'../router_moe_{DATASET_NAME}_{date_str}'
-    trainer.save_model(save_path)
-    print(f"Model saved to: {save_path}")
+    print(f"Model will be saved to: {save_path}")
     
-    # Evaluate on test dataset (same as train.py structure)
-    print("\n=== Evaluating on test dataset ===")
-    test_dataset = BreastCancerDataset(
-        split='test',
-        splits_dir=SPLITS_DIR,
-        dataset_name=DATASET_NAME,
-        image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch
-    )
-    print(f'Test dataset: {len(test_dataset)} samples')
-    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    try:
+        trainer.train()
+        
+        # Save model after successful training (same as train.py)
+        trainer.save_model(save_path)
+        print(f"Model saved to: {save_path}")
+        
+        # Evaluate on test dataset (same as train.py structure)
+        print("\n=== Evaluating on test dataset ===")
+        test_dataset = BreastCancerDataset(
+            split='test',
+            splits_dir=SPLITS_DIR,
+            dataset_name=DATASET_NAME,
+            image_processor=image_processor,
+            model_type=get_model_type(MODEL_NAME),
+            dataset_epoch=epoch
+        )
+        print(f'Test dataset: {len(test_dataset)} samples')
+        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+        
+        # Print test results (exactly like train.py and test.py)
+        print("\n=== Test Results ===")
+        for key, value in test_results.items():
+            if isinstance(value, float):
+                print(f"{key}: {value:.4f}")
+            else:
+                print(f"{key}: {value}")
     
-    # Print test results (exactly like train.py and test.py)
-    print("\n=== Test Results ===")
-    for key, value in test_results.items():
-        if isinstance(value, float):
-            print(f"{key}: {value:.4f}")
-        else:
-            print(f"{key}: {value}")
+    except Exception as e:
+        print(f"Training/Evaluation failed: {e}")
+        # Still save the model if training completed but evaluation failed
+        trainer.save_model(save_path)
+        print(f"Model saved to: {save_path} (despite evaluation error)")
+        raise e
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
     parser.add_argument('--epoch', type=int, default=None, help='Dataset epoch value to pass to dataset')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
+    parser.add_argument('--weight_moe2', type=str, default=None, help='Path to saved Router MoE model for testing only')
     args = parser.parse_args()
 
-    main(args.config, args.epoch, args.dataset)
+    main(args.config, args.epoch, args.dataset, args.weight_moe2)
