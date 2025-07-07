@@ -375,6 +375,7 @@ def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
     trainer = Trainer(
         model=model,
         args=training_args,
+        eval_dataset=test_dataset,  # Add this line - use test_dataset as eval_dataset
         processing_class=image_processor,
         data_collator=collate_fn,
         compute_metrics=eval_compute_metrics_fn,
