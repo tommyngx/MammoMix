@@ -486,13 +486,13 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         lr_scheduler_type='constant',  # CONSTANT learning rate
         lr_scheduler_kwargs={},
         eval_do_concat_batches=eval_do_concat_batches,
-        disable_tqdm=False,
+        disable_tqdm=False,  # Keep progress bars enabled
         logging_dir=wandb_dir if wandb_dir else "./logs",
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=save_total_limit,
-        logging_strategy="steps",
-        logging_steps=5,  # Log very frequently
+        logging_strategy="epoch",  # CHANGED: Log only at epoch level, not steps
+        logging_steps=None,  # REMOVED: No frequent step logging
         report_to="all",
         load_best_model_at_end=True,
         metric_for_best_model=metric_for_best_model,
