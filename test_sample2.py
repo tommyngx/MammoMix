@@ -289,7 +289,7 @@ def evaluate_model(model, test_dataset, image_processor, config, device, model_n
         traceback.print_exc()
         return None
 
-def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir, dataset_name, device):
+def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir, dataset_name, device, image_processor):
     """Run single sample comparison test."""
     print(f"\n=== One Testing Mode: Random Sample Comparison ===")
     
@@ -343,10 +343,26 @@ def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir,
             
             if len(models_list) >= 2:
                 integrated_moe = create_moe_model(models_list, moe_model_path, device)
-                moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
                 
+                # Use the same validated wrapper as in full evaluation
+                moe_detector = ValidatedMoEObjectDetectionModel(
+                    MoEObjectDetectionModel(integrated_moe), 
+                    image_processor
+                ).to(device)
+                
+                # Debug: Check raw vs validated output
                 with torch.no_grad():
+                    # Raw MoE output
+                    raw_moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
+                    raw_moe_pred = raw_moe_detector(pixel_values_single)
+                    print(f"  Raw MoE pred_boxes shape: {raw_moe_pred.pred_boxes.shape}")
+                    print(f"  Raw MoE pred_boxes last dim: {raw_moe_pred.pred_boxes.shape[-1]}")
+                    
+                    # Validated MoE output
                     moe_pred = moe_detector(pixel_values_single)
+                    print(f"  Validated MoE pred_boxes shape: {moe_pred.pred_boxes.shape}")
+                    print(f"  Validated MoE pred_boxes last dim: {moe_pred.pred_boxes.shape[-1]}")
+                    
                     print(f"  Logits shape: {moe_pred.logits.shape}")
                     print(f"  Pred boxes shape: {moe_pred.pred_boxes.shape}")
                     
@@ -438,9 +454,9 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
     # Create test dataset
     test_dataset = create_test_dataset(SPLITS_DIR, DATASET_NAME, image_processor, MODEL_NAME, epoch)
     
-    # Handle one testing mode
+    # Handle one testing mode - pass image_processor
     if one_testing:
-        run_one_testing_mode(expert_model, test_dataset, moe_model, weight_dir, DATASET_NAME, device)
+        run_one_testing_mode(expert_model, test_dataset, moe_model, weight_dir, DATASET_NAME, device, image_processor)
         return
     
     # Normal testing flow
