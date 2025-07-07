@@ -99,26 +99,3 @@ def get_eval_compute_metrics_fn(image_processor):
         compute_metrics, image_processor=image_processor,
         threshold=0.5, id2label={0: 'cancer'}
     )
-            batch_boxes_tensor = batch_boxes_tensor[..., :4]
-        
-        output = ModelOutput(logits=torch.tensor(batch_logits), pred_boxes=batch_boxes_tensor)
-        
-        try:
-            post_processed_output = image_processor.post_process_object_detection(
-                output, threshold=threshold, target_sizes=target_sizes
-            )
-            post_processed_predictions.extend(post_processed_output)
-        except Exception as e:
-            print(f"ERROR in evaluation batch {batch_idx}: {e}")
-            print(f"pred_boxes shape: {output.pred_boxes.shape}")
-            raise e
-
-    metrics = mean_average_precision(post_processed_predictions, post_processed_targets)
-    metrics.pop('map_per_class')
-    return {k: v for k, v in metrics.items() if k.startswith('map')}
-
-def get_eval_compute_metrics_fn(image_processor):
-    return partial(
-        compute_metrics, image_processor=image_processor,
-        threshold=0.5, id2label={0: 'cancer'}
-    )
