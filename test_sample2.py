@@ -518,7 +518,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                     print(f"  Pred boxes last dim: {wrapped_moe_output.pred_boxes.shape[-1]}")
                     print(f"  Direct MoE pred_boxes[0,0,:]: {wrapped_moe_output.pred_boxes[0, 0, :]}")
                 
-                # Test post-processing
+                # Test post-processing with the wrapped model
                 if not test_post_processing(moe_detector, test_dataset, image_processor, device):
                     print("Post-processing test failed, but continuing with evaluation...")
                 
