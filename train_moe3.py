@@ -464,11 +464,12 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
             best_val_acc = val_acc
             best_epoch = epoch_idx + 1
             
-            # Save classifier
-            classifier_save_path = os.path.join(weight_dir, 'dataset_classifier_best')
-            os.makedirs(classifier_save_path, exist_ok=True)
-            torch.save(classifier.state_dict(), os.path.join(classifier_save_path, 'classifier.pth'))
-            print(f"Best classifier saved (acc: {val_acc:.4f})")
+            # Save classifier in organized directory structure
+            moe_save_dir = os.path.join(weight_dir, 'moe_combined')
+            os.makedirs(moe_save_dir, exist_ok=True)
+            classifier_save_path = os.path.join(moe_save_dir, 'classifier_best.pth')
+            torch.save(classifier.state_dict(), classifier_save_path)
+            print(f"Best classifier saved to {classifier_save_path} (acc: {val_acc:.4f})")
         
         # Test MoE after each epoch
         print(f"\n=== Testing MoE with Current Classifier (Epoch {epoch_idx + 1}) ===")
@@ -476,8 +477,9 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
     
     print(f"\nBest classifier accuracy: {best_val_acc:.4f} (Epoch {best_epoch})")
     
-    # Load best classifier
-    best_path = os.path.join(weight_dir, 'dataset_classifier_best', 'classifier.pth')
+    # Load best classifier from new path
+    moe_save_dir = os.path.join(weight_dir, 'moe_combined')
+    best_path = os.path.join(moe_save_dir, 'classifier_best.pth')
     classifier.load_state_dict(torch.load(best_path, map_location=device))
     classifier.eval()
     
@@ -543,6 +545,30 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, 
         stats = moe_model.get_routing_stats()
         print(f"Routing: CSAW={stats['CSAW']*100:.1f}%, DMID={stats['DMID']*100:.1f}%, DDSM={stats['DDSM']*100:.1f}%")
         
+        # Save MoE model for specific dataset tests
+        if dataset_name and epoch_num != "FINAL":
+            moe_save_dir = os.path.join(weight_dir, f'moe_{dataset_name}')
+            os.makedirs(moe_save_dir, exist_ok=True)
+            
+            # Save classifier
+            classifier_path = os.path.join(moe_save_dir, f'classifier_epoch{epoch_num}.pth')
+            torch.save(classifier.state_dict(), classifier_path)
+            
+            # Save MoE results
+            results_path = os.path.join(moe_save_dir, f'results_epoch{epoch_num}.json')
+            with open(results_path, 'w') as f:
+                # Convert numpy types to native Python types for JSON serialization
+                json_results = {}
+                for k, v in results.items():
+                    if isinstance(v, (np.integer, np.floating, np.ndarray)):
+                        json_results[k] = float(v)
+                    else:
+                        json_results[k] = v
+                json_results['routing_stats'] = stats
+                json.dump(json_results, f, indent=2)
+            
+            print(f"Saved MoE model and results to {moe_save_dir}")
+        
         return results
         
     except Exception as e:
@@ -579,16 +605,41 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
         print("FINAL TEST WITH BEST CLASSIFIER")
         print("="*50)
         
-        classifier_path = os.path.join(expert_weights_dir, 'dataset_classifier_best', 'classifier.pth')
+        # Load classifier from new organized path
+        moe_save_dir = os.path.join(expert_weights_dir, 'moe_combined')
+        classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
+        
         if not os.path.exists(classifier_path):
-            raise FileNotFoundError(f"Classifier not found: {classifier_path}")
+            raise FileNotFoundError(f"Classifier not found at {classifier_path}. Run Phase 1 first.")
         
         classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
         classifier.load_state_dict(torch.load(classifier_path, map_location=device))
         classifier.eval()
         
-        # Test on specified dataset or all datasets
-        test_moe_with_classifier(config, classifier, device, "FINAL", expert_weights_dir, dataset)
+        # Test on specified dataset and save final results
+        results = test_moe_with_classifier(config, classifier, device, "FINAL", expert_weights_dir, dataset)
+        
+        # Save final MoE model for the tested dataset
+        if dataset and results:
+            moe_save_dir = os.path.join(expert_weights_dir, f'moe_{dataset}')
+            os.makedirs(moe_save_dir, exist_ok=True)
+            
+            # Save final classifier
+            final_classifier_path = os.path.join(moe_save_dir, 'classifier_final.pth')
+            torch.save(classifier.state_dict(), final_classifier_path)
+            
+            # Save final results
+            final_results_path = os.path.join(moe_save_dir, 'results_final.json')
+            with open(final_results_path, 'w') as f:
+                json_results = {}
+                for k, v in results.items():
+                    if isinstance(v, (np.integer, np.floating, np.ndarray)):
+                        json_results[k] = float(v)
+                    else:
+                        json_results[k] = v
+                json.dump(json_results, f, indent=2)
+            
+            print(f"Final MoE model saved to {moe_save_dir}")
     
     print("\n" + "="*50)
     print("TRAINING COMPLETE!")
