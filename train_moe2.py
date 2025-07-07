@@ -81,8 +81,7 @@ class ImageRouterMoE(nn.Module):
     def forward(self, pixel_values, labels=None, return_routing=False):
         """
         Forward pass: route each image to best expert and return expert's output.
-        Compatible with Trainer interface (includes labels parameter).
-        Uses object detection loss like YOLOS instead of classification loss.
+        NO COMBINATION - just return the chosen expert's output directly.
         """
         batch_size = pixel_values.shape[0]
         
@@ -91,44 +90,75 @@ class ImageRouterMoE(nn.Module):
         routing_probs = F.softmax(routing_logits, dim=1)
         expert_choices = torch.argmax(routing_probs, dim=1)  # Shape: (batch_size,)
         
-        # Get predictions from chosen experts
-        batch_outputs = []
-        routing_losses = []
+        # For training: compute routing loss to learn better routing
+        routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        if labels is not None:
+            # Get outputs from all experts to compare losses (for routing learning)
+            expert_losses = []
+            for expert_idx in range(len(self.experts)):
+                with torch.no_grad():
+                    expert_output = self.experts[expert_idx](pixel_values, labels=labels)
+                    if hasattr(expert_output, 'loss') and expert_output.loss is not None:
+                        expert_losses.append(expert_output.loss)
+            
+            if len(expert_losses) > 0:
+                # Find best expert (lowest loss) for routing supervision
+                expert_losses_tensor = torch.stack(expert_losses)
+                best_expert_indices = torch.argmin(expert_losses_tensor.unsqueeze(0).expand(batch_size, -1), dim=1)
+                
+                # Routing loss: encourage router to choose the best expert
+                routing_loss = F.cross_entropy(routing_logits, best_expert_indices)
         
+        # For batch processing, we need to group by expert choice
+        expert_groups = {}
         for i in range(batch_size):
             expert_idx = expert_choices[i].item()
-            single_input = pixel_values[i:i+1]  # Keep batch dimension
-            single_labels = labels[i:i+1] if labels is not None else None
-            
-            with torch.no_grad():
-                expert_output = self.experts[expert_idx](single_input, labels=single_labels)
-            
-            batch_outputs.append(expert_output)
-            
-            # Compute routing loss using object detection loss (like YOLOS training)
-            if labels is not None and hasattr(expert_output, 'loss') and expert_output.loss is not None:
-                # Use the expert's object detection loss as routing signal
-                # Lower loss = better expert choice for this sample
-                routing_losses.append(expert_output.loss)
+            if expert_idx not in expert_groups:
+                expert_groups[expert_idx] = []
+            expert_groups[expert_idx].append(i)
         
-        # Combine outputs (same structure as individual experts)
-        combined_output = self._combine_batch_outputs(batch_outputs)
+        # Initialize output tensors
+        batch_logits = torch.zeros(batch_size, 100, 2, device=pixel_values.device)  # Assuming 100 queries, 2 classes
+        batch_pred_boxes = torch.zeros(batch_size, 100, 4, device=pixel_values.device)  # Always 4 dimensions
+        batch_loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=True)
+        batch_last_hidden_state = None
         
-        # Compute routing loss if we have labels (training mode)
-        if labels is not None and len(routing_losses) > 0:
-            # Add routing loss to the combined loss (similar to YOLOS auxiliary loss)
-            routing_loss = torch.stack(routing_losses).mean()
+        # Process each expert group
+        for expert_idx, sample_indices in expert_groups.items():
+            # Get inputs for this expert
+            expert_pixel_values = pixel_values[sample_indices]
+            expert_labels = labels[sample_indices] if labels is not None else None
             
-            # Create routing targets based on which expert had lowest loss
+            # Get expert output
             with torch.no_grad():
-                routing_targets = expert_choices.clone()  # Use current choices as targets
+                expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
             
-            # Compute cross-entropy loss for routing
-            routing_ce_loss = F.cross_entropy(routing_logits, routing_targets)
+            # Place expert outputs back into batch positions
+            batch_logits[sample_indices] = expert_output.logits
+            batch_pred_boxes[sample_indices] = expert_output.pred_boxes[..., :4]  # Ensure exactly 4 dims
             
-            # Combine object detection loss with routing loss (like YOLOS)
-            total_loss = combined_output.loss + 0.1 * routing_ce_loss  # Weight routing loss similar to auxiliary_loss
-            combined_output.loss = total_loss
+            if hasattr(expert_output, 'loss') and expert_output.loss is not None:
+                batch_loss = batch_loss + expert_output.loss * len(sample_indices) / batch_size
+            
+            if batch_last_hidden_state is None and hasattr(expert_output, 'last_hidden_state'):
+                batch_last_hidden_state = torch.zeros(batch_size, expert_output.last_hidden_state.shape[1], 
+                                                     expert_output.last_hidden_state.shape[2], device=pixel_values.device)
+            if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
+                batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
+        
+        # Add routing loss to total loss (if training)
+        if labels is not None and routing_loss.item() > 0:
+            batch_loss = batch_loss + 0.1 * routing_loss
+        
+        # Create output exactly like a single YOLOS model
+        from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
+        
+        combined_output = YolosObjectDetectionOutput(
+            loss=batch_loss,
+            logits=batch_logits,
+            pred_boxes=batch_pred_boxes,
+            last_hidden_state=batch_last_hidden_state
+        )
         
         if return_routing:
             return combined_output, routing_probs, expert_choices
@@ -136,31 +166,8 @@ class ImageRouterMoE(nn.Module):
             return combined_output
     
     def _combine_batch_outputs(self, batch_outputs):
-        """Combine individual expert outputs into a batch."""
-        # All outputs should have same structure, concatenate along batch dimension
-        combined_logits = torch.cat([out.logits for out in batch_outputs], dim=0)
-        combined_pred_boxes = torch.cat([out.pred_boxes for out in batch_outputs], dim=0)
-        
-        # CRITICAL: Ensure pred_boxes has exactly 4 dimensions (same fix as train_moe.py)
-        if combined_pred_boxes.shape[-1] != 4:
-            print(f"WARNING: Fixing pred_boxes from {combined_pred_boxes.shape} to exactly 4 dims")
-            combined_pred_boxes = combined_pred_boxes[..., :4].contiguous()
-        
-        # Combine losses if present (like YOLOS training)
-        if hasattr(batch_outputs[0], 'loss') and batch_outputs[0].loss is not None:
-            combined_loss = torch.stack([out.loss for out in batch_outputs]).mean()
-        else:
-            combined_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-        
-        # Create combined output (same as train.py approach)
-        from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
-        
-        return YolosObjectDetectionOutput(
-            loss=combined_loss,
-            logits=combined_logits,
-            pred_boxes=combined_pred_boxes,
-            last_hidden_state=batch_outputs[0].last_hidden_state if hasattr(batch_outputs[0], 'last_hidden_state') else None
-        )
+        """This method is no longer needed - we process by expert groups instead."""
+        pass
 
 def load_expert_models(weight_dir, device):
     """Load the 3 expert models (similar to train.py model loading)."""
