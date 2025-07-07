@@ -442,3 +442,16 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None, tes
         print("\n" + "="*60)
         print("TEST-ONLY MODE COMPLETED!")
         print("="*60)
+        return results
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Number of epochs')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name for testing (CSAW/DMID/DDSM)')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Expert weights directory')
+    parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase (1: train only, 2: test only, None: both)')
+    parser.add_argument('--test', action='store_true', help='Test-only mode: load classifier and test MoE without training')
+    args = parser.parse_args()
+
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase, args.test)
