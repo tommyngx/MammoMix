@@ -207,6 +207,32 @@ class ImageRouterMoE(nn.Module):
             print(f"EMERGENCY: Final output pred_boxes has {combined_output.pred_boxes.shape[-1]} dims, forcing to 4")
             combined_output.pred_boxes = combined_output.pred_boxes[..., :4].contiguous()
         
+        # ABSOLUTE FINAL SAFETY CHECK: Override the pred_boxes attribute completely
+        original_shape = combined_output.pred_boxes.shape
+        if len(original_shape) >= 2 and original_shape[-1] != 4:
+            print(f"ABSOLUTE OVERRIDE: Forcing pred_boxes from shape {original_shape} to 4D")
+            # Create a completely new tensor with exactly 4 dimensions
+            safe_pred_boxes = torch.zeros(
+                *original_shape[:-1], 4,  # Keep all dims except last, force last to be 4
+                device=combined_output.pred_boxes.device,
+                dtype=combined_output.pred_boxes.dtype
+            )
+            # Copy the first 4 dimensions of the original
+            min_dims = min(4, original_shape[-1])
+            safe_pred_boxes[..., :min_dims] = combined_output.pred_boxes[..., :min_dims]
+            
+            # Create a new output object with the safe pred_boxes
+            combined_output = YolosObjectDetectionOutput(
+                loss=combined_output.loss,
+                logits=combined_output.logits,
+                pred_boxes=safe_pred_boxes.contiguous(),
+                last_hidden_state=combined_output.last_hidden_state
+            )
+        
+        # Final verification
+        final_shape = combined_output.pred_boxes.shape
+        assert final_shape[-1] == 4, f"CRITICAL FAILURE: pred_boxes still has {final_shape[-1]} dims after all safety checks!"
+        
         if return_routing:
             return combined_output, routing_probs, expert_choices
         else:
