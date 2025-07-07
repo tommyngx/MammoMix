@@ -504,7 +504,10 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         print(f"Raw MoE pred_boxes sample values: {raw_moe_output.pred_boxes[0, 0, :8] if raw_moe_output.pred_boxes.shape[-1] > 8 else raw_moe_output.pred_boxes[0, 0, :]}")
                 
                 # Create validated wrapper - now simplified since train_moe.py handles the formatting
-                moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
+                moe_detector = ValidatedMoEObjectDetectionModel(
+                    MoEObjectDetectionModel(integrated_moe), 
+                    image_processor
+                ).to(device)
                 
                 # Test wrapped output
                 with torch.no_grad():
@@ -519,7 +522,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                 if not test_post_processing(moe_detector, test_dataset, image_processor, device):
                     print("Post-processing test failed, but continuing with evaluation...")
                 
-                # Evaluate MoE - use direct MoE model since train_moe.py now handles output formatting
+                # Evaluate MoE - use ValidatedMoEObjectDetectionModel wrapper to ensure loss is present
                 moe_results = evaluate_model(moe_detector, test_dataset, image_processor, config, device, "MoE")
 
             else:
