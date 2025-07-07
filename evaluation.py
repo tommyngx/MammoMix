@@ -73,19 +73,19 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
             #print(f"[EVAL DEBUG] batch_logits type: {type(batch_logits)}")
             #print(f"[EVAL DEBUG] batch_boxes type: {type(batch_boxes)}")
             
-            if hasattr(batch_boxes, 'shape'):
+            #if hasattr(batch_boxes, 'shape'):
                 #print(f"[EVAL DEBUG] batch_boxes shape: {batch_boxes.shape}")
-            elif isinstance(batch_boxes, (list, np.ndarray)):
+            #elif isinstance(batch_boxes, (list, np.ndarray)):
                 #print(f"[EVAL DEBUG] batch_boxes array shape: {np.array(batch_boxes).shape}")
             
             # Check if batch[2] is actually last_hidden_state instead of pred_boxes
-            if hasattr(batch_boxes, 'shape') and len(batch_boxes.shape) >= 2 and batch_boxes.shape[-1] == 768:
+            #if hasattr(batch_boxes, 'shape') and len(batch_boxes.shape) >= 2 and batch_boxes.shape[-1] == 768:
                 #print(f"[EVAL DEBUG] WARNING: batch[2] seems to be last_hidden_state (768 dims), not pred_boxes!")
                 
                 # Try to find pred_boxes in other batch positions
                 for i, item in enumerate(batch):
                     if hasattr(item, 'shape') and len(item.shape) >= 2 and item.shape[-1] == 4:
-                        #print(f"[EVAL DEBUG] Found 4D tensor at batch[{i}]: {item.shape}")
+                        print(f"[EVAL DEBUG] Found 4D tensor at batch[{i}]: {item.shape}")
                         batch_boxes = item
                         break
                 else:
