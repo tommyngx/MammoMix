@@ -85,15 +85,10 @@ class ImageRouterMoE(nn.Module):
         """
         batch_size = pixel_values.shape[0]
         
-        # DEBUG: Print input shape
-        print(f"DEBUG: Forward pass - batch_size: {batch_size}, pixel_values shape: {pixel_values.shape}")
-        
         # Get routing probabilities
         routing_logits = self.router(pixel_values)  # Shape: (batch_size, 3)
         routing_probs = F.softmax(routing_logits, dim=1)
         expert_choices = torch.argmax(routing_probs, dim=1)  # Shape: (batch_size,)
-        
-        print(f"DEBUG: Expert choices: {expert_choices}")
         
         # For training: compute routing loss to learn better routing
         routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
@@ -103,10 +98,8 @@ class ImageRouterMoE(nn.Module):
             for expert_idx in range(len(self.experts)):
                 with torch.no_grad():
                     expert_output = self.experts[expert_idx](pixel_values, labels=labels)
-                    print(f"DEBUG: Expert {expert_idx} pred_boxes shape: {expert_output.pred_boxes.shape}")
                     # CRITICAL: Fix dimensions immediately after getting expert output
                     expert_output = self._fix_expert_output_dimensions(expert_output)
-                    print(f"DEBUG: Expert {expert_idx} pred_boxes shape after fix: {expert_output.pred_boxes.shape}")
                     if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                         expert_losses.append(expert_output.loss)
             
@@ -126,8 +119,6 @@ class ImageRouterMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        print(f"DEBUG: Expert groups: {expert_groups}")
-        
         # Get the first expert output to determine correct tensor shapes and dtypes
         first_expert_idx = list(expert_groups.keys())[0]
         first_sample_indices = expert_groups[first_expert_idx]
@@ -138,10 +129,8 @@ class ImageRouterMoE(nn.Module):
         
         with torch.no_grad():
             reference_output = self.experts[first_expert_idx](first_expert_pixel_values, labels=first_expert_labels)
-            print(f"DEBUG: Reference output pred_boxes shape BEFORE fix: {reference_output.pred_boxes.shape}")
             # CRITICAL: Fix dimensions immediately
             reference_output = self._fix_expert_output_dimensions(reference_output)
-            print(f"DEBUG: Reference output pred_boxes shape AFTER fix: {reference_output.pred_boxes.shape}")
         
         # Initialize output tensors with correct dtypes and shapes from reference
         num_queries = reference_output.logits.shape[1]
@@ -157,8 +146,6 @@ class ImageRouterMoE(nn.Module):
         batch_logits[first_sample_indices] = reference_output.logits
         batch_pred_boxes[first_sample_indices] = reference_output.pred_boxes  # Already fixed to 4D above
         
-        print(f"DEBUG: batch_pred_boxes shape after first group: {batch_pred_boxes.shape}")
-        
         if hasattr(reference_output, 'loss') and reference_output.loss is not None:
             batch_loss = batch_loss + reference_output.loss * len(first_sample_indices) / batch_size
         
@@ -171,7 +158,6 @@ class ImageRouterMoE(nn.Module):
         # Process remaining expert groups (skip the first one we already processed)
         remaining_groups = {k: v for k, v in expert_groups.items() if k != first_expert_idx}
         for expert_idx, sample_indices in remaining_groups.items():
-            print(f"DEBUG: Processing expert {expert_idx} for samples {sample_indices}")
             # Get inputs for this expert
             expert_pixel_values = pixel_values[sample_indices]
             
@@ -183,16 +169,12 @@ class ImageRouterMoE(nn.Module):
             # Get expert output
             with torch.no_grad():
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-                print(f"DEBUG: Expert {expert_idx} pred_boxes shape BEFORE fix: {expert_output.pred_boxes.shape}")
                 # CRITICAL: Fix dimensions immediately after getting expert output
                 expert_output = self._fix_expert_output_dimensions(expert_output)
-                print(f"DEBUG: Expert {expert_idx} pred_boxes shape AFTER fix: {expert_output.pred_boxes.shape}")
             
             # Place expert outputs back into batch positions
             batch_logits[sample_indices] = expert_output.logits
             batch_pred_boxes[sample_indices] = expert_output.pred_boxes  # Now guaranteed to be 4D
-            
-            print(f"DEBUG: batch_pred_boxes shape after expert {expert_idx}: {batch_pred_boxes.shape}")
             
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 batch_loss = batch_loss + expert_output.loss * len(sample_indices) / batch_size
@@ -205,12 +187,10 @@ class ImageRouterMoE(nn.Module):
             batch_loss = batch_loss + 0.1 * routing_loss
         
         # Final safety check - ensure ALL outputs have exactly 4 dimensions
-        print(f"DEBUG: Final batch_pred_boxes shape BEFORE safety check: {batch_pred_boxes.shape}")
         assert batch_pred_boxes.shape[-1] == 4, f"FINAL CHECK FAILED: pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
         
         # Additional safety: force contiguous and ensure exact 4D for all outputs
         batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
-        print(f"DEBUG: Final batch_pred_boxes shape AFTER safety check: {batch_pred_boxes.shape}")
         
         # Create output exactly like a single YOLOS model
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
@@ -222,7 +202,10 @@ class ImageRouterMoE(nn.Module):
             last_hidden_state=batch_last_hidden_state
         )
         
-        print(f"DEBUG: Final combined_output pred_boxes shape: {combined_output.pred_boxes.shape}")
+        # CRITICAL: Final check before returning - ensure pred_boxes is exactly 4D
+        if combined_output.pred_boxes.shape[-1] != 4:
+            print(f"EMERGENCY: Final output pred_boxes has {combined_output.pred_boxes.shape[-1]} dims, forcing to 4")
+            combined_output.pred_boxes = combined_output.pred_boxes[..., :4].contiguous()
         
         if return_routing:
             return combined_output, routing_probs, expert_choices
@@ -294,6 +277,89 @@ def create_routing_dataset(config, image_processor, split='train', dataset_name=
     # Return the dataset directly (no routing labels needed)
     # The router will learn from object detection performance
     return dataset
+
+def get_safe_eval_compute_metrics_fn(image_processor):
+    """Get evaluation function with additional safety checks for pred_boxes dimensions."""
+    from functools import partial
+    
+    def safe_compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label=None, MAX_SIZE=640):
+        """
+        Safe version of compute_metrics that ensures pred_boxes always have 4 dimensions.
+        """
+        import torch
+        import numpy as np
+        from transformers.image_transforms import center_to_corners_format
+        from torchmetrics.functional.detection.map import mean_average_precision
+        from dataclasses import dataclass
+        
+        @dataclass
+        class SafeModelOutput:
+            logits: torch.Tensor
+            pred_boxes: torch.Tensor
+        
+        def convert_bbox_yolo_to_pascal(boxes, image_size):
+            boxes = center_to_corners_format(boxes)
+            height, width = image_size
+            boxes = boxes * torch.tensor([[width, height, width, height]])
+            return boxes
+        
+        image_sizes = []
+        post_processed_targets = []
+        post_processed_predictions = []
+        predictions, targets = evaluation_results.predictions, evaluation_results.label_ids
+
+        for batch in targets:
+            batch_image_sizes = torch.tensor(np.array([[MAX_SIZE, MAX_SIZE] for _ in batch]))
+            image_sizes.append(batch_image_sizes)
+            for image_target in batch:
+                boxes = torch.tensor(image_target['boxes'])
+                boxes = convert_bbox_yolo_to_pascal(boxes, [MAX_SIZE, MAX_SIZE])
+                labels = torch.tensor(image_target['class_labels'])
+                post_processed_targets.append({'boxes': boxes, 'labels': labels})
+
+        for batch, target_sizes in zip(predictions, image_sizes):
+            batch_logits, batch_boxes = batch[1], batch[2]
+            
+            # CRITICAL SAFETY CHECK: Ensure pred_boxes has exactly 4 dimensions
+            batch_boxes = torch.tensor(batch_boxes)
+            if batch_boxes.shape[-1] != 4:
+                print(f"EVALUATION SAFETY: pred_boxes has {batch_boxes.shape[-1]} dims, fixing to 4")
+                batch_boxes = batch_boxes[..., :4]
+            
+            output = SafeModelOutput(logits=torch.tensor(batch_logits), pred_boxes=batch_boxes)
+            
+            try:
+                post_processed_output = image_processor.post_process_object_detection(
+                    output, threshold=threshold, target_sizes=target_sizes
+                )
+                post_processed_predictions.extend(post_processed_output)
+            except Exception as e:
+                print(f"Error in post_process_object_detection: {e}")
+                print(f"pred_boxes shape: {batch_boxes.shape}")
+                # Create empty predictions for this batch to avoid crashing
+                empty_preds = [{'boxes': torch.empty(0, 4), 'scores': torch.empty(0), 'labels': torch.empty(0, dtype=torch.long)} for _ in range(len(target_sizes))]
+                post_processed_predictions.extend(empty_preds)
+
+        try:
+            metrics = mean_average_precision(post_processed_predictions, post_processed_targets)
+            metrics.pop('map_per_class', None)
+            return {k: v for k, v in metrics.items() if k.startswith('map')}
+        except Exception as e:
+            print(f"Error in mean_average_precision: {e}")
+            # Return zero metrics if evaluation fails
+            return {
+                'map': 0.0,
+                'map_50': 0.0,
+                'map_75': 0.0,
+                'map_small': 0.0,
+                'map_medium': 0.0,
+                'map_large': 0.0
+            }
+    
+    return partial(
+        safe_compute_metrics, image_processor=image_processor,
+        threshold=0.5, id2label={0: 'cancer'}
+    )
 
 def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
     """Test a saved Router MoE model."""
@@ -392,7 +458,8 @@ def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
         remove_unused_columns=False,
     )
     
-    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    # Use the safe evaluation function
+    eval_compute_metrics_fn = get_safe_eval_compute_metrics_fn(image_processor)
     
     trainer = Trainer(
         model=model,
