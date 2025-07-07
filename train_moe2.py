@@ -43,26 +43,32 @@ def load_config(config_path):
 class ImageRouterMoE(nn.Module):
     """
     Router-based MoE that learns to route images to the best expert.
-    SIMPLIFIED: Much simpler architecture for faster training
+    IMPROVED: Better architecture and learning signals
     """
     def __init__(self, expert_models, device):
         super().__init__()
         self.experts = nn.ModuleList(expert_models)  # [CSAW, DMID, DDSM]
         self.device = device
         
-        # ULTRA SIMPLE router network: just 2 layers
+        # IMPROVED router network: Use image features + metadata
         self.router = nn.Sequential(
-            # Very simple feature extractor
-            nn.AdaptiveAvgPool2d(1),  # Global average pooling: 640x640x3 -> 1x1x3
-            nn.Flatten(),             # 3 features
+            # Better feature extraction
+            nn.Conv2d(3, 32, 7, stride=4, padding=3),  # 640->160
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(4),  # 160->4x4 = 16 features per channel
+            nn.Flatten(),  # 32*16 = 512 features
             
-            # Direct classification - no hidden layers
-            nn.Linear(3, 3),          # RGB -> 3 experts directly
+            # Better classifier
+            nn.Linear(512, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 32),
+            nn.ReLU(),
+            nn.Linear(32, 3),  # 3 experts
         )
         
-        # Simple initialization
-        nn.init.xavier_uniform_(self.router[2].weight)
-        nn.init.zeros_(self.router[2].bias)
+        # Proper initialization
+        self._initialize_weights()
         
         # Freeze expert models (similar to train.py approach)
         for expert in self.experts:
@@ -88,22 +94,49 @@ class ImageRouterMoE(nn.Module):
     def forward(self, pixel_values, labels=None, return_routing=False):
         """
         Forward pass: route each image to best expert and return expert's output.
-        SIMPLIFIED: Much simpler routing logic
+        IMPROVED: Router learns to choose the BEST expert based on performance
         """
         batch_size = pixel_values.shape[0]
         
-        # Get routing probabilities - SUPER SIMPLE
+        # Get routing probabilities
         routing_logits = self.router(pixel_values)  # Shape: (batch_size, 3)
-        expert_choices = torch.argmax(routing_logits, dim=1)  # Shape: (batch_size,)
+        routing_probs = F.softmax(routing_logits, dim=1)
+        expert_choices = torch.argmax(routing_probs, dim=1)  # Shape: (batch_size,)
         
-        # SIMPLIFIED routing loss computation - only during training
+        # IMPROVED routing loss: Learn to choose the BEST expert
         routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         if labels is not None:
-            # Simple approach: just encourage uniform distribution
-            routing_probs = F.softmax(routing_logits, dim=1)
-            expert_usage = routing_probs.mean(dim=0)  # Average usage per expert
-            target_usage = torch.ones_like(expert_usage) / len(self.experts)  # Uniform
-            routing_loss = F.mse_loss(expert_usage, target_usage)
+            # Get loss from ALL experts to find the best one
+            expert_losses = []
+            expert_outputs_list = []
+            
+            for expert_idx in range(len(self.experts)):
+                with torch.no_grad():
+                    expert_output = self.experts[expert_idx](pixel_values, labels=labels)
+                    expert_output = self._fix_expert_output_dimensions(expert_output)
+                    expert_outputs_list.append(expert_output)
+                    
+                    # Get the actual loss for this expert
+                    if hasattr(expert_output, 'loss') and expert_output.loss is not None:
+                        expert_losses.append(expert_output.loss)
+            
+            if len(expert_losses) > 0:
+                # Find BEST expert (lowest loss) for each sample
+                expert_losses_tensor = torch.stack(expert_losses)  # Shape: (n_experts,)
+                
+                # For each sample, find which expert performs best
+                best_expert_indices = torch.argmin(expert_losses_tensor.unsqueeze(0).expand(batch_size, -1), dim=1)
+                
+                # SUPERVISION: Train router to choose the best expert
+                routing_loss = F.cross_entropy(routing_logits, best_expert_indices)
+                
+                # Optional: Add small diversity loss to prevent collapse
+                expert_usage = routing_probs.mean(dim=0)
+                target_usage = torch.ones_like(expert_usage) / len(self.experts)
+                diversity_loss = F.mse_loss(expert_usage, target_usage)
+                
+                # Combine: strong supervision + weak diversity
+                routing_loss = routing_loss + 0.1 * diversity_loss
         
         # For batch processing, group by expert choice
         expert_groups = {}
@@ -170,9 +203,9 @@ class ImageRouterMoE(nn.Module):
             if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
                 batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
         
-        # Add VERY SMALL routing loss - just for diversity
+        # Add STRONG routing loss to total loss
         if labels is not None and routing_loss.item() > 0:
-            batch_loss = batch_loss + 0.01 * routing_loss  # Very small weight
+            batch_loss = batch_loss + 0.5 * routing_loss  # Increased weight for learning
         
         # Final safety check
         assert batch_pred_boxes.shape[-1] == 4, f"pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
@@ -192,6 +225,17 @@ class ImageRouterMoE(nn.Module):
             return combined_output, F.softmax(routing_logits, dim=1), expert_choices
         else:
             return combined_output
+    
+    def _initialize_weights(self):
+        """Better weight initialization for faster learning"""
+        for m in self.router.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
     
     def _fix_expert_output_dimensions(self, expert_output):
         """Fix expert output dimensions to ensure pred_boxes has exactly 4 dimensions."""
