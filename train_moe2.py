@@ -63,7 +63,7 @@ class ImageRouterMoE(nn.Module):
             #nn.Linear(512, 128),
             #nn.ReLU(),
             #nn.Dropout(0.3),
-            nn.Linear(128, 32),
+            nn.Linear(512, 32),
             nn.ReLU(),
             nn.Linear(32, 3),  # 3 experts
         )
