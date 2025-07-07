@@ -825,6 +825,82 @@ def train_phase2_moe(config, expert_models, pretrained_router, device, dataset_n
     
     return model, test_results
 
+def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
+    """
+    Main function:
+    Phase 1: Train router on COMBINED dataset and evaluate MoE after each epoch
+    Phase 2: Just load best router and show final results (no training)
+    """
+    config = load_config(config_path)
+    
+    # Configuration
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if weight_dir is not None:
+        expert_weights_dir = weight_dir
+    else:
+        expert_weights_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
+    
+    if not os.path.exists(expert_weights_dir):
+        raise ValueError(f"Expert weights directory not found: {expert_weights_dir}")
+    
+    print(f"Using device: {device}")
+    print(f"Training on COMBINED dataset from all 3 sources")
+    print(f"Expert weights: {expert_weights_dir}")
+    
+    # Load expert models
+    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
+    
+    if phase == "1" or phase is None:
+        # Phase 1: Train router on combined data with evaluation after each epoch
+        router = train_phase1_router(config, expert_models, device, epoch, expert_weights_dir)
+        
+        if phase == "1":
+            print("Phase 1 completed. Router trained on combined dataset.")
+            return
+    
+    if phase == "2" or phase is None:
+        # Phase 2: Load best router and show final results
+        print("\n" + "="*50)
+        print("PHASE 2: Final Evaluation with Best Router")
+        print("="*50)
+        
+        best_router_path = os.path.join(expert_weights_dir, 'router_combined_best', 'router.pth')
+        
+        if not os.path.exists(best_router_path):
+            raise FileNotFoundError(f"Best router not found at {best_router_path}. Run Phase 1 first.")
+        
+        # Load best router
+        router = DataRouter(num_experts=3, device=device).to(device)
+        router.load_state_dict(torch.load(best_router_path, map_location=device))
+        router.eval()
+        print(f"Loaded best router from: {best_router_path}")
+        
+        # Create test dataset
+        SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+        MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+        image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+        
+        test_dataset = create_combined_dataset(config, image_processor, 'test', epoch)
+        
+        # Final evaluation
+        test_results, routing_stats = evaluate_moe_with_router(
+            router, expert_models, test_dataset, image_processor, device, "FINAL"
+        )
+        
+        print(f"\n{'='*50}")
+        print("FINAL RESULTS WITH BEST ROUTER:")
+        for key, value in test_results.items():
+            if isinstance(value, float):
+                print(f"  {key}: {value:.4f}")
+            else:
+                print(f"  {key}: {value}")
+        print(f"{'='*50}")
+    
+    print("\n" + "="*50)
+    print("TRAINING AND EVALUATION COMPLETE!")
+    print("="*50)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
