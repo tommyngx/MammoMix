@@ -85,10 +85,15 @@ class ImageRouterMoE(nn.Module):
         """
         batch_size = pixel_values.shape[0]
         
+        # DEBUG: Print input shape
+        print(f"DEBUG: Forward pass - batch_size: {batch_size}, pixel_values shape: {pixel_values.shape}")
+        
         # Get routing probabilities
         routing_logits = self.router(pixel_values)  # Shape: (batch_size, 3)
         routing_probs = F.softmax(routing_logits, dim=1)
         expert_choices = torch.argmax(routing_probs, dim=1)  # Shape: (batch_size,)
+        
+        print(f"DEBUG: Expert choices: {expert_choices}")
         
         # For training: compute routing loss to learn better routing
         routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
@@ -98,8 +103,10 @@ class ImageRouterMoE(nn.Module):
             for expert_idx in range(len(self.experts)):
                 with torch.no_grad():
                     expert_output = self.experts[expert_idx](pixel_values, labels=labels)
+                    print(f"DEBUG: Expert {expert_idx} pred_boxes shape: {expert_output.pred_boxes.shape}")
                     # CRITICAL: Fix dimensions immediately after getting expert output
                     expert_output = self._fix_expert_output_dimensions(expert_output)
+                    print(f"DEBUG: Expert {expert_idx} pred_boxes shape after fix: {expert_output.pred_boxes.shape}")
                     if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                         expert_losses.append(expert_output.loss)
             
@@ -119,6 +126,8 @@ class ImageRouterMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
+        print(f"DEBUG: Expert groups: {expert_groups}")
+        
         # Get the first expert output to determine correct tensor shapes and dtypes
         first_expert_idx = list(expert_groups.keys())[0]
         first_sample_indices = expert_groups[first_expert_idx]
@@ -129,8 +138,10 @@ class ImageRouterMoE(nn.Module):
         
         with torch.no_grad():
             reference_output = self.experts[first_expert_idx](first_expert_pixel_values, labels=first_expert_labels)
+            print(f"DEBUG: Reference output pred_boxes shape BEFORE fix: {reference_output.pred_boxes.shape}")
             # CRITICAL: Fix dimensions immediately
             reference_output = self._fix_expert_output_dimensions(reference_output)
+            print(f"DEBUG: Reference output pred_boxes shape AFTER fix: {reference_output.pred_boxes.shape}")
         
         # Initialize output tensors with correct dtypes and shapes from reference
         num_queries = reference_output.logits.shape[1]
@@ -146,6 +157,8 @@ class ImageRouterMoE(nn.Module):
         batch_logits[first_sample_indices] = reference_output.logits
         batch_pred_boxes[first_sample_indices] = reference_output.pred_boxes  # Already fixed to 4D above
         
+        print(f"DEBUG: batch_pred_boxes shape after first group: {batch_pred_boxes.shape}")
+        
         if hasattr(reference_output, 'loss') and reference_output.loss is not None:
             batch_loss = batch_loss + reference_output.loss * len(first_sample_indices) / batch_size
         
@@ -158,6 +171,7 @@ class ImageRouterMoE(nn.Module):
         # Process remaining expert groups (skip the first one we already processed)
         remaining_groups = {k: v for k, v in expert_groups.items() if k != first_expert_idx}
         for expert_idx, sample_indices in remaining_groups.items():
+            print(f"DEBUG: Processing expert {expert_idx} for samples {sample_indices}")
             # Get inputs for this expert
             expert_pixel_values = pixel_values[sample_indices]
             
@@ -169,12 +183,16 @@ class ImageRouterMoE(nn.Module):
             # Get expert output
             with torch.no_grad():
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
+                print(f"DEBUG: Expert {expert_idx} pred_boxes shape BEFORE fix: {expert_output.pred_boxes.shape}")
                 # CRITICAL: Fix dimensions immediately after getting expert output
                 expert_output = self._fix_expert_output_dimensions(expert_output)
+                print(f"DEBUG: Expert {expert_idx} pred_boxes shape AFTER fix: {expert_output.pred_boxes.shape}")
             
             # Place expert outputs back into batch positions
             batch_logits[sample_indices] = expert_output.logits
             batch_pred_boxes[sample_indices] = expert_output.pred_boxes  # Now guaranteed to be 4D
+            
+            print(f"DEBUG: batch_pred_boxes shape after expert {expert_idx}: {batch_pred_boxes.shape}")
             
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 batch_loss = batch_loss + expert_output.loss * len(sample_indices) / batch_size
@@ -187,10 +205,12 @@ class ImageRouterMoE(nn.Module):
             batch_loss = batch_loss + 0.1 * routing_loss
         
         # Final safety check - ensure ALL outputs have exactly 4 dimensions
+        print(f"DEBUG: Final batch_pred_boxes shape BEFORE safety check: {batch_pred_boxes.shape}")
         assert batch_pred_boxes.shape[-1] == 4, f"FINAL CHECK FAILED: pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
         
         # Additional safety: force contiguous and ensure exact 4D for all outputs
         batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
+        print(f"DEBUG: Final batch_pred_boxes shape AFTER safety check: {batch_pred_boxes.shape}")
         
         # Create output exactly like a single YOLOS model
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
@@ -201,6 +221,8 @@ class ImageRouterMoE(nn.Module):
             pred_boxes=batch_pred_boxes,  # Now guaranteed to be exactly 4D
             last_hidden_state=batch_last_hidden_state
         )
+        
+        print(f"DEBUG: Final combined_output pred_boxes shape: {combined_output.pred_boxes.shape}")
         
         if return_routing:
             return combined_output, routing_probs, expert_choices
