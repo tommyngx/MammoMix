@@ -116,7 +116,7 @@ class SimpleDatasetClassifier(nn.Module):
 class SimpleMoE(nn.Module):
     """
     Đơn giản: classifier chọn expert → lấy output expert → đưa ra kết quả
-    Không phức tạp, freeze expert, evaluate như test.py
+    FIXED: Đảm bảo routing statistics chính xác và output filtering
     """
     def __init__(self, expert_models, dataset_classifier, device):
         super().__init__()
@@ -136,7 +136,7 @@ class SimpleMoE(nn.Module):
             param.requires_grad = False
         self.classifier.eval()  # Luôn eval mode
         
-        # Statistics
+        # Statistics - FIXED: Reset properly for each evaluation
         self.routing_counts = torch.zeros(3, device=device)
         self.total_routed = 0
 
@@ -147,21 +147,27 @@ class SimpleMoE(nn.Module):
         pass
     
     def forward(self, pixel_values, labels=None, return_routing=False):
-        """Forward pass with dataset classification routing."""
+        """
+        Forward pass with dataset classification routing.
+        FIXED: Đảm bảo routing chính xác và output giống như individual expert.
+        """
         batch_size = pixel_values.shape[0]
         
-        # 1. Classifier chọn expert - LUÔN no_grad
+        # 1. Classifier chọn expert - LUÔN no_grad và eval mode
         with torch.no_grad():
+            # Đảm bảo classifier ở eval mode
+            self.classifier.eval()
             dataset_logits = self.classifier(pixel_values)
             expert_choices = torch.argmax(dataset_logits, dim=1)
         
-        # Statistics
+        # 2. FIXED: Chỉ cập nhật statistics khi eval và đảm bảo đúng batch size
         if not self.training:
+            # Cập nhật routing counts chính xác
             for choice in expert_choices:
                 self.routing_counts[choice] += 1
             self.total_routed += batch_size
         
-        # 2. Group by expert
+        # 3. Group by expert - CHÍNH XÁC
         expert_groups = {}
         for i in range(batch_size):
             expert_idx = expert_choices[i].item()
@@ -169,48 +175,71 @@ class SimpleMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        # 3. Get expert outputs
+        # 4. FIXED: Lấy expert outputs với device handling chính xác
         sample_to_output = {}
         total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         for expert_idx, sample_indices in expert_groups.items():
+            # Lấy pixel values cho group này
             expert_pixel_values = pixel_values[sample_indices]
             expert_labels = None
             if labels is not None:
                 expert_labels = [labels[i] for i in sample_indices]
             
+            # CRITICAL: Đảm bảo expert ở eval mode và xử lý device đúng
             with torch.no_grad():
+                self.experts[expert_idx].eval()
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
             
+            # Accumulate loss with proper weighting
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 weight = len(sample_indices) / batch_size
                 total_loss = total_loss + expert_output.loss * weight
             
+            # FIXED: Lưu output với index mapping chính xác
             for i, sample_idx in enumerate(sample_indices):
                 sample_to_output[sample_idx] = {
-                    'logits': expert_output.logits[i],
-                    'pred_boxes': expert_output.pred_boxes[i],
+                    'logits': expert_output.logits[i].clone(),  # Clone để tránh reference issues
+                    'pred_boxes': expert_output.pred_boxes[i].clone(),
                 }
         
-        # 4. Reconstruct batch
+        # 5. FIXED: Reconstruct batch với dimension checking
         batch_logits = []
         batch_pred_boxes = []
+        
+        # Lấy reference shape từ first expert output
+        first_sample_idx = list(sample_to_output.keys())[0]
+        ref_logits_shape = sample_to_output[first_sample_idx]['logits'].shape
+        ref_boxes_shape = sample_to_output[first_sample_idx]['pred_boxes'].shape
         
         for i in range(batch_size):
             if i in sample_to_output:
                 batch_logits.append(sample_to_output[i]['logits'])
                 batch_pred_boxes.append(sample_to_output[i]['pred_boxes'])
             else:
-                dummy_logits = torch.zeros((100, 2), device=pixel_values.device)
-                dummy_boxes = torch.zeros((100, 4), device=pixel_values.device)
+                # KHÔNG NÊN XẢY RA - tạo dummy với đúng shape
+                print(f"WARNING: No output for sample {i} - this should not happen!")
+                dummy_logits = torch.zeros(ref_logits_shape, device=pixel_values.device)
+                dummy_boxes = torch.zeros(ref_boxes_shape, device=pixel_values.device)
                 batch_logits.append(dummy_logits)
                 batch_pred_boxes.append(dummy_boxes)
         
-        batch_logits = torch.stack(batch_logits, dim=0)
-        batch_pred_boxes = torch.stack(batch_pred_boxes, dim=0)
-        batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
+        # Stack thành batch tensors với error checking
+        try:
+            batch_logits = torch.stack(batch_logits, dim=0)
+            batch_pred_boxes = torch.stack(batch_pred_boxes, dim=0)
+        except Exception as e:
+            print(f"Error stacking outputs: {e}")
+            print(f"Batch size: {batch_size}, Outputs: {len(batch_logits)}")
+            raise e
         
-        # 5. Create output
+        # CRITICAL: Đảm bảo pred_boxes có đúng 4 dimensions
+        if batch_pred_boxes.shape[-1] != 4:
+            print(f"Warning: pred_boxes has {batch_pred_boxes.shape[-1]} dims, truncating to 4")
+            batch_pred_boxes = batch_pred_boxes[..., :4]
+        batch_pred_boxes = batch_pred_boxes.contiguous()
+        
+        # 6. Tạo output với format chính xác
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
         
         final_loss = None
@@ -235,7 +264,7 @@ class SimpleMoE(nn.Module):
             return combined_output
     
     def get_routing_stats(self):
-        """Get routing statistics."""
+        """Get routing statistics - FIXED: Đảm bảo tính toán chính xác."""
         if self.total_routed == 0:
             return {name: 0.0 for name in self.expert_names}
         
@@ -246,9 +275,10 @@ class SimpleMoE(nn.Module):
         return stats
     
     def reset_routing_stats(self):
-        """Reset routing statistics."""
-        self.routing_counts.zero_()
+        """Reset routing statistics - FIXED: Đảm bảo reset hoàn toàn."""
+        self.routing_counts = torch.zeros(3, device=self.device)
         self.total_routed = 0
+        print(f"Routing statistics reset - total_routed: {self.total_routed}")
 
 def load_expert_models(weight_dir, device):
     """Load expert models silently."""
@@ -308,7 +338,10 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     # Create SimpleMoE
     moe_model = SimpleMoE(expert_models, classifier, device).to(device)
     moe_model.eval()
+    
+    # FIXED: Reset routing statistics BEFORE evaluation
     moe_model.reset_routing_stats()
+    print(f"SimpleMoE reset - starting fresh evaluation on {len(test_dataset)} samples")
     
     print(f"Evaluating SimpleMoE on {dataset_name} ({len(test_dataset)} samples)...")
     
@@ -358,6 +391,9 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
             compute_metrics=eval_compute_metrics_fn,
         )
         
+        # FIXED: Reset routing stats RIGHT BEFORE evaluation
+        moe_model.reset_routing_stats()
+        
         # Run evaluation exactly like test.py
         print(f'Test loader: {len(test_dataset)} samples')
         test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
@@ -373,6 +409,9 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     except Exception as e:
         print(f"mAP evaluation failed due to evaluation.py bug: {e}")
         print("Falling back to basic evaluation without mAP metrics...")
+        
+        # FIXED: Reset routing stats before fallback evaluation too
+        moe_model.reset_routing_stats()
         
         # Fallback: Basic evaluation without compute_metrics to avoid the bug
         training_args_basic = TrainingArguments(
@@ -414,8 +453,22 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
         print("\nNote: mAP metrics unavailable due to evaluation.py bug")
         print("Loss and basic metrics shown above")
     
-    # Get routing statistics
+    # Get routing statistics - SHOULD MATCH TEST DATASET SIZE
     final_stats = moe_model.get_routing_stats()
+    
+    # VERIFICATION: Check if routing stats match expected test dataset size
+    expected_samples = len(test_dataset)
+    actual_samples = moe_model.total_routed
+    
+    print(f"\n=== Routing Verification ===")
+    print(f"Expected samples (test dataset): {expected_samples}")
+    print(f"Actual samples routed: {actual_samples}")
+    
+    if actual_samples != expected_samples:
+        print(f"⚠️  WARNING: Routing count mismatch! Expected {expected_samples}, got {actual_samples}")
+        print("This indicates a problem with routing statistics calculation")
+    else:
+        print("✓ Routing count matches test dataset size")
     
     # Print routing statistics
     print(f"\n=== Routing Statistics ===")
@@ -439,7 +492,7 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     else:
         print("✗ Poor routing (<60%)")
     
-    # Save results
+    # Save results with verification info
     test_results_path = os.path.join(moe_save_dir, f'moe_results_{dataset_name}.json')
     with open(test_results_path, 'w') as f:
         json_results = {}
@@ -451,7 +504,9 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
         json_results['routing_stats'] = final_stats
         json_results['dataset'] = dataset_name
         json_results['total_routed'] = total_routed
+        json_results['expected_samples'] = expected_samples
         json_results['routing_accuracy'] = target_usage
+        json_results['routing_count_correct'] = (actual_samples == expected_samples)
         json.dump(json_results, f, indent=2)
     
     print(f"\nResults saved to: {test_results_path}")
