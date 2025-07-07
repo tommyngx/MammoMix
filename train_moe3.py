@@ -996,6 +996,23 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
     
     print(f"\n1. Testing individual {dataset_name} expert...")
     
+    # Helper function to move labels to device
+    def move_labels_to_device(labels_list, target_device):
+        """Move all label tensors to target device."""
+        if labels_list is None:
+            return None
+        
+        moved_labels = []
+        for label_dict in labels_list:
+            moved_dict = {}
+            for key, value in label_dict.items():
+                if isinstance(value, torch.Tensor):
+                    moved_dict[key] = value.to(target_device)
+                else:
+                    moved_dict[key] = value
+            moved_labels.append(moved_dict)
+        return moved_labels
+    
     # Simple forward pass without evaluation metrics
     individual_expert.eval()
     total_loss = 0.0
@@ -1007,6 +1024,9 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
         for batch in tqdm(test_loader, desc="Individual Expert"):
             pixel_values = batch['pixel_values'].to(device)
             labels = batch['labels']
+            
+            # CRITICAL: Move labels to same device as model
+            labels = move_labels_to_device(labels, device)
             
             output = individual_expert(pixel_values, labels=labels)
             
@@ -1031,6 +1051,9 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
         for batch in tqdm(test_loader, desc="SimpleMoE"):
             pixel_values = batch['pixel_values'].to(device)
             labels = batch['labels']
+            
+            # CRITICAL: Move labels to same device as model
+            labels = move_labels_to_device(labels, device)
             
             output = moe_model(pixel_values, labels=labels)
             
