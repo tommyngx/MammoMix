@@ -573,7 +573,7 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"RouterMoE_{DATASET_NAME}_{date_str}"
     
-    # ULTRA FAST training arguments
+    # ULTRA FAST training arguments - FIXED FP16 issues
     training_args = TrainingArguments(
         output_dir=output_dir,  # Save to weight_dir
         run_name=run_name,
@@ -597,12 +597,16 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         load_best_model_at_end=True,  # Automatically load best model
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
-        fp16=torch.cuda.is_available(),  # Use FP16 for speed
+        fp16=False,  # DISABLE FP16 to avoid optimizer issues
+        bf16=False,  # DISABLE BF16 as well
         dataloader_num_workers=0,  # Keep at 0 to avoid issues
         dataloader_pin_memory=False,  # Disable for simplicity
         gradient_accumulation_steps=1,  # No accumulation for speed
         remove_unused_columns=remove_unused_columns,
         max_grad_norm=1.0,  # Gradient clipping for stability
+        dataloader_drop_last=False,  # Don't drop last batch
+        ddp_find_unused_parameters=False,  # Disable to avoid warnings
+        save_safetensors=True,  # Use safetensors for saving
     )
     
     # Use the same evaluation function as train.py
