@@ -141,6 +141,11 @@ class ImageRouterMoE(nn.Module):
         combined_logits = torch.cat([out.logits for out in batch_outputs], dim=0)
         combined_pred_boxes = torch.cat([out.pred_boxes for out in batch_outputs], dim=0)
         
+        # CRITICAL: Ensure pred_boxes has exactly 4 dimensions (same fix as train_moe.py)
+        if combined_pred_boxes.shape[-1] != 4:
+            print(f"WARNING: Fixing pred_boxes from {combined_pred_boxes.shape} to exactly 4 dims")
+            combined_pred_boxes = combined_pred_boxes[..., :4].contiguous()
+        
         # Combine losses if present (like YOLOS training)
         if hasattr(batch_outputs[0], 'loss') and batch_outputs[0].loss is not None:
             combined_loss = torch.stack([out.loss for out in batch_outputs]).mean()
@@ -226,10 +231,10 @@ def main(config_path, epoch=None, dataset=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Get weight_dir from config (instead of argument)
+    # Get weight_dir from config (instead of argument) - same pattern as train.py
     weight_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
     if not os.path.exists(weight_dir):
-        raise ValueError(f"Expert weights directory not found: {weight_dir}")
+        raise ValueError(f"Expert weights directory not found: {weight_dir}. Please add 'moe.expert_weights_dir' to your config.")
     
     print("Loading expert models...")
     expert_models, expert_processors = load_expert_models(weight_dir, device)
