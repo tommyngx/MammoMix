@@ -127,7 +127,11 @@ class ImageRouterMoE(nn.Module):
         for expert_idx, sample_indices in expert_groups.items():
             # Get inputs for this expert
             expert_pixel_values = pixel_values[sample_indices]
-            expert_labels = labels[sample_indices] if labels is not None else None
+            
+            # Fix: Handle labels properly - labels is a list, so we need to extract individual items
+            expert_labels = None
+            if labels is not None:
+                expert_labels = [labels[i] for i in sample_indices]
             
             # Get expert output
             with torch.no_grad():
