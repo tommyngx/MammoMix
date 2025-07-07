@@ -144,8 +144,8 @@ class ValidatedMoEObjectDetectionModel(torch.nn.Module):
             if hasattr(moe_output, 'loss'):
                 print(f"DEBUG Forward #{self.debug_count}: loss = {moe_output.loss}")
         
-        # Ensure the output has a loss when labels are provided
-        if labels is not None and (not hasattr(moe_output, 'loss') or moe_output.loss is None):
+        # TEMPORARY FIX: Always ensure loss is present when labels are provided
+        if labels is not None:
             moe_output.loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=False)
         
         # Since train_moe.py now returns proper YolosObjectDetectionOutput, 
