@@ -381,6 +381,23 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
             item['dataset_label'] = self.labels[idx]
             return item
     
+    # Custom collate function to handle dataset_label
+    def custom_collate_fn(batch):
+        # Extract dataset labels
+        dataset_labels = [item['dataset_label'] for item in batch]
+        
+        # Remove dataset_label from items before using standard collate
+        for item in batch:
+            del item['dataset_label']
+        
+        # Use standard collate function
+        collated = collate_fn(batch)
+        
+        # Add dataset labels back
+        collated['dataset_label'] = dataset_labels
+        
+        return collated
+    
     # Create labeled datasets
     train_labeled = LabeledDataset(combined_train_dataset, all_train_labels)
     val_labeled = LabeledDataset(combined_val_dataset, all_val_labels)
@@ -395,7 +412,7 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
         train_correct = 0
         train_total = 0
         
-        train_loader = DataLoader(train_labeled, batch_size=16, shuffle=True, collate_fn=collate_fn)
+        train_loader = DataLoader(train_labeled, batch_size=16, shuffle=True, collate_fn=custom_collate_fn)
         
         for batch in tqdm(train_loader, desc="Training"):
             pixel_values = batch['pixel_values'].to(device)
@@ -420,7 +437,7 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
         val_correct = 0
         val_total = 0
         
-        val_loader = DataLoader(val_labeled, batch_size=16, shuffle=False, collate_fn=collate_fn)
+        val_loader = DataLoader(val_labeled, batch_size=16, shuffle=False, collate_fn=custom_collate_fn)
         
         with torch.no_grad():
             for batch in tqdm(val_loader, desc="Validation"):
@@ -572,23 +589,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase)
-    train_expert_counts = np.bincount(train_routing_labels[:len(train_performances)], minlength=3)
-    print(f"Training expert distribution: CSAW={train_expert_counts[0]}, DMID={train_expert_counts[1]}, DDSM={train_expert_counts[2]}")
-    
-    # Create router model
-    router = DataRouter(num_experts=3, device=device).to(device)
-    
-    # Training setup
-    optimizer = torch.optim.AdamW(router.parameters(), lr=1e-4, weight_decay=1e-4)
-    num_epochs = epoch if epoch else 10
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
-    
-    best_val_acc = 0.0
-    best_test_results = None
-    best_epoch = 0
-    
-    # Training loop with evaluation after each epoch
-    for epoch_idx in range(num_epochs):
         print(f"\n{'='*30} Epoch {epoch_idx + 1}/{num_epochs} {'='*30}")
         
         # Training phase
