@@ -143,15 +143,20 @@ class IntegratedMoE(nn.Module):
         # Get dimensions
         num_queries = reference_output.logits.shape[1]
         num_classes = reference_output.logits.shape[2]
+        box_dims = reference_output.pred_boxes.shape[2]  # Should be 4
         
         # Initialize combined logits and boxes
         combined_logits = torch.zeros(batch_size, num_queries, num_classes, 
                                     device=reference_output.logits.device)
+        combined_pred_boxes = torch.zeros(batch_size, num_queries, box_dims,
+                                        device=reference_output.pred_boxes.device)
         
         # For each sample in batch, combine outputs from its top-k experts
         for batch_idx in range(batch_size):
             sample_combined_logits = torch.zeros(num_queries, num_classes, 
                                                device=reference_output.logits.device)
+            sample_combined_boxes = torch.zeros(num_queries, box_dims,
+                                               device=reference_output.pred_boxes.device)
             
             # Get top-k experts for this sample
             for k_idx in range(self.top_k):
@@ -160,36 +165,35 @@ class IntegratedMoE(nn.Module):
                 
                 # Weight and add expert's contribution
                 expert_logits = expert_outputs[expert_idx].logits[batch_idx]
+                expert_boxes = expert_outputs[expert_idx].pred_boxes[batch_idx]
+                
                 sample_combined_logits += expert_weight * expert_logits
+                sample_combined_boxes += expert_weight * expert_boxes
             
             combined_logits[batch_idx] = sample_combined_logits
+            combined_pred_boxes[batch_idx] = sample_combined_boxes
         
-        # Create output object compatible with transformers
-        class ObjectDetectionOutput:
-            def __init__(self, logits, pred_boxes=None):
-                self.logits = logits
-                self.pred_boxes = pred_boxes if pred_boxes is not None else reference_output.pred_boxes
-                self.loss = torch.tensor(0.0, device=logits.device, requires_grad=False)
-                
-            def __getitem__(self, key):
-                """Make object subscriptable for Trainer compatibility"""
-                if key == 0:
-                    return self.loss
-                elif key == "loss":
-                    return self.loss
-                elif isinstance(key, slice):
-                    if key == slice(1, None, None):  # outputs[1:]
-                        return (self.logits,)
-                    else:
-                        return ()
-                else:
-                    raise KeyError(f"Key {key} not found")
-                    
-            def keys(self):
-                """Return available keys"""
-                return ["loss", "logits", "pred_boxes"]
-                
-        return ObjectDetectionOutput(combined_logits)
+        # Ensure pred_boxes has exactly 4 dimensions
+        if combined_pred_boxes.shape[-1] != 4:
+            print(f"WARNING: Combined pred_boxes has {combined_pred_boxes.shape[-1]} dims, fixing to 4")
+            if combined_pred_boxes.shape[-1] > 4:
+                combined_pred_boxes = combined_pred_boxes[..., :4]
+            else:
+                # Pad with zeros if less than 4
+                padding_size = 4 - combined_pred_boxes.shape[-1]
+                padding = torch.zeros(*combined_pred_boxes.shape[:-1], padding_size,
+                                    device=combined_pred_boxes.device, dtype=combined_pred_boxes.dtype)
+                combined_pred_boxes = torch.cat([combined_pred_boxes, padding], dim=-1)
+        
+        # Create output object exactly like reference expert output
+        from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
+        
+        return YolosObjectDetectionOutput(
+            loss=reference_output.loss if hasattr(reference_output, 'loss') else torch.tensor(0.0, device=combined_logits.device),
+            logits=combined_logits,
+            pred_boxes=combined_pred_boxes,
+            last_hidden_state=reference_output.last_hidden_state if hasattr(reference_output, 'last_hidden_state') else None
+        )
 
 # ================================
 # TRAINING UTILITIES
@@ -359,19 +363,52 @@ def get_model_probs(models, image_processors, data_loader):
 class MoEObjectDetectionModel(nn.Module):
     """
     Wrapper around IntegratedMoE to provide object detection interface
-    similar to standard YOLOS models for compatibility with test.py
+    identical to standard YOLOS models for compatibility with evaluation
     """
     def __init__(self, integrated_moe):
         super().__init__()
         self.moe = integrated_moe
         
     def forward(self, pixel_values, labels=None, **kwargs):
-        """Return object detection outputs compatible with test.py evaluation"""
-        # Get MoE combined output - this now returns properly structured output
+        """Return object detection outputs exactly like expert models"""
+        # Get MoE combined output
         combined_outputs, final_pred, weights, expert_probs, top_indices = self.moe(pixel_values)
         
-        # Return the combined outputs directly without any wrapper
-        # This should be identical to what individual expert models return
+        # Ensure the output structure is exactly like expert models
+        # The evaluation expects the output to have the same attributes and structure
+        # as what comes from AutoModelForObjectDetection
+        
+        # Validate that pred_boxes has exactly 4 dimensions
+        if combined_outputs.pred_boxes.shape[-1] != 4:
+            print(f"MoEObjectDetectionModel: Fixing pred_boxes from {combined_outputs.pred_boxes.shape} to 4 dims")
+            if combined_outputs.pred_boxes.shape[-1] > 4:
+                combined_outputs.pred_boxes = combined_outputs.pred_boxes[..., :4]
+            else:
+                # Pad with zeros if less than 4
+                batch_size, num_queries = combined_outputs.pred_boxes.shape[:2]
+                padding_size = 4 - combined_outputs.pred_boxes.shape[-1]
+                padding = torch.zeros(batch_size, num_queries, padding_size,
+                                    device=combined_outputs.pred_boxes.device, 
+                                    dtype=combined_outputs.pred_boxes.dtype)
+                combined_outputs.pred_boxes = torch.cat([combined_outputs.pred_boxes, padding], dim=-1)
+        
+        # Ensure tensors are contiguous for evaluation
+        combined_outputs.logits = combined_outputs.logits.contiguous()
+        combined_outputs.pred_boxes = combined_outputs.pred_boxes.contiguous()
+        
+        # Make sure the output has all required attributes for evaluation
+        if not hasattr(combined_outputs, 'loss'):
+            combined_outputs.loss = torch.tensor(0.0, device=combined_outputs.logits.device)
+        
+        if not hasattr(combined_outputs, 'last_hidden_state'):
+            batch_size, num_queries = combined_outputs.logits.shape[:2]
+            hidden_size = 768  # Standard YOLOS hidden size
+            combined_outputs.last_hidden_state = torch.zeros(
+                batch_size, num_queries, hidden_size,
+                device=combined_outputs.logits.device,
+                dtype=combined_outputs.logits.dtype
+            )
+        
         return combined_outputs
 
 def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None):
