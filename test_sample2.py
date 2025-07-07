@@ -318,7 +318,7 @@ def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir,
                 integrated_moe = create_moe_model(models_list, moe_model_path, device)
                 
                 # Create MoE - use direct MoEObjectDetectionModel without additional wrapper
-                integrated_moe = create_moe_model(models_list, moe_model, device)
+                #integrated_moe = create_moe_model(models_list, moe_model, device)
                 moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
                 
                 # Quick validation test
