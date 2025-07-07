@@ -69,7 +69,7 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
         #print(f"[EVAL DEBUG] Batch length: {len(batch) if hasattr(batch, '__len__') else 'no len'}")
         
         if len(batch) >= 3:
-            batch_logits, batch_boxes = batch[1], batch[2]
+                batch_logits, batch_boxes = batch[1], batch[2]
             #print(f"[EVAL DEBUG] batch_logits type: {type(batch_logits)}")
             #print(f"[EVAL DEBUG] batch_boxes type: {type(batch_boxes)}")
             
