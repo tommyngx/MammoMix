@@ -60,9 +60,9 @@ class ImageRouterMoE(nn.Module):
             nn.Flatten(),  # 32*16 = 512 features
             
             # Better classifier
-            nn.Linear(512, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
+            #nn.Linear(512, 128),
+            #nn.ReLU(),
+            #nn.Dropout(0.3),
             nn.Linear(128, 32),
             nn.ReLU(),
             nn.Linear(32, 3),  # 3 experts
