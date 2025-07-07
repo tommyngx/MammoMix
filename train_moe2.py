@@ -491,14 +491,14 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=save_total_limit,
-        logging_strategy="epoch",  # CHANGED: Log only at epoch level, not steps
-        logging_steps=None,  # REMOVED: No frequent step logging
+        logging_strategy="epoch",  # Log only at epoch level
         report_to="all",
         load_best_model_at_end=True,
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
         fp16=torch.cuda.is_available(),
-        dataloader_num_workers=dataloader_num_workers,
+        dataloader_num_workers=0,  # REDUCED to 0 to avoid tqdm conflicts
+        dataloader_pin_memory=False,  # Disable pin memory to fix tqdm
         gradient_accumulation_steps=1,  # NO accumulation
         remove_unused_columns=remove_unused_columns,
     )
