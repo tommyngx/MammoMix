@@ -128,6 +128,16 @@ class ImageRouterMoE(nn.Module):
         with torch.no_grad():
             reference_output = self.experts[first_expert_idx](first_expert_pixel_values, labels=first_expert_labels)
         
+        # CRITICAL: Fix pred_boxes dimensions immediately from reference output
+        if reference_output.pred_boxes.shape[-1] != 4:
+            print(f"WARNING: Reference expert pred_boxes has {reference_output.pred_boxes.shape[-1]} dims, fixing to 4")
+            reference_output = type(reference_output)(
+                loss=reference_output.loss,
+                logits=reference_output.logits,
+                pred_boxes=reference_output.pred_boxes[..., :4].contiguous(),
+                last_hidden_state=reference_output.last_hidden_state if hasattr(reference_output, 'last_hidden_state') else None
+            )
+        
         # Initialize output tensors with correct dtypes and shapes from reference
         num_queries = reference_output.logits.shape[1]
         num_classes = reference_output.logits.shape[2]
@@ -140,7 +150,7 @@ class ImageRouterMoE(nn.Module):
         
         # Use the reference output for the first group
         batch_logits[first_sample_indices] = reference_output.logits
-        batch_pred_boxes[first_sample_indices] = reference_output.pred_boxes[..., :4]
+        batch_pred_boxes[first_sample_indices] = reference_output.pred_boxes  # Already fixed to 4D above
         
         if hasattr(reference_output, 'loss') and reference_output.loss is not None:
             batch_loss = batch_loss + reference_output.loss * len(first_sample_indices) / batch_size
@@ -166,9 +176,19 @@ class ImageRouterMoE(nn.Module):
             with torch.no_grad():
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
             
+            # CRITICAL: Fix pred_boxes dimensions before using the output
+            if expert_output.pred_boxes.shape[-1] != 4:
+                print(f"WARNING: Expert {expert_idx} pred_boxes has {expert_output.pred_boxes.shape[-1]} dims, fixing to 4")
+                expert_output = type(expert_output)(
+                    loss=expert_output.loss,
+                    logits=expert_output.logits,
+                    pred_boxes=expert_output.pred_boxes[..., :4].contiguous(),
+                    last_hidden_state=expert_output.last_hidden_state if hasattr(expert_output, 'last_hidden_state') else None
+                )
+            
             # Place expert outputs back into batch positions
             batch_logits[sample_indices] = expert_output.logits
-            batch_pred_boxes[sample_indices] = expert_output.pred_boxes[..., :4]  # Ensure exactly 4 dims
+            batch_pred_boxes[sample_indices] = expert_output.pred_boxes  # Now guaranteed to be 4D
             
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 batch_loss = batch_loss + expert_output.loss * len(sample_indices) / batch_size
