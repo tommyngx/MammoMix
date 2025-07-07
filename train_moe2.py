@@ -50,20 +50,34 @@ class ImageRouterMoE(nn.Module):
         self.experts = nn.ModuleList(expert_models)  # [CSAW, DMID, DDSM]
         self.device = device
         
-        # Minimal router network: very simple CNN + classifier
+        # IMPROVED router network: more capacity and better architecture
         self.router = nn.Sequential(
-            # Simple feature extractor - much smaller
-            nn.Conv2d(3, 16, 7, stride=4, padding=3),  # 640->160
+            # Better feature extractor
+            nn.Conv2d(3, 32, 7, stride=4, padding=3),  # 640->160
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(4),  # 160->40
-            nn.Conv2d(16, 32, 5, stride=2, padding=2),  # 40->20
+            
+            nn.Conv2d(32, 64, 5, stride=2, padding=2),  # 40->20
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),  # 20->10
+            
+            nn.Conv2d(64, 128, 3, stride=1, padding=1),  # 10->10
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d(1),  # Global average pooling -> 1x1
             nn.Flatten(),
             
-            # Simple classifier (3 classes: CSAW=0, DMID=1, DDSM=2)
-            nn.Linear(32, 3),  # Direct to 3 experts, no hidden layers
+            # Better classifier with dropout
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(64, 3),  # Output 3 experts
         )
+        
+        # Initialize weights properly
+        self._initialize_weights()
         
         # Freeze expert models (similar to train.py approach)
         for expert in self.experts:
@@ -78,10 +92,24 @@ class ImageRouterMoE(nn.Module):
         print(f'Total parameters: {total_params / 1e6:.2f}M')
         print(f'Trainable parameters: {trainable_params / 1e3:.2f}K (router only)')
     
+    def _initialize_weights(self):
+        """Initialize weights properly for faster convergence"""
+        for m in self.router.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+    
     def forward(self, pixel_values, labels=None, return_routing=False):
         """
         Forward pass: route each image to best expert and return expert's output.
-        NO COMBINATION - just return the chosen expert's output directly.
+        IMPROVED: Better routing supervision and loss computation
         """
         batch_size = pixel_values.shape[0]
         
@@ -90,26 +118,38 @@ class ImageRouterMoE(nn.Module):
         routing_probs = F.softmax(routing_logits, dim=1)
         expert_choices = torch.argmax(routing_probs, dim=1)  # Shape: (batch_size,)
         
-        # For training: compute routing loss to learn better routing
+        # IMPROVED routing loss computation
         routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         if labels is not None:
             # Get outputs from all experts to compare losses (for routing learning)
             expert_losses = []
+            expert_outputs_list = []
+            
             for expert_idx in range(len(self.experts)):
                 with torch.no_grad():
                     expert_output = self.experts[expert_idx](pixel_values, labels=labels)
-                    # CRITICAL: Fix dimensions immediately after getting expert output
                     expert_output = self._fix_expert_output_dimensions(expert_output)
+                    expert_outputs_list.append(expert_output)
+                    
                     if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                         expert_losses.append(expert_output.loss)
             
             if len(expert_losses) > 0:
-                # Find best expert (lowest loss) for routing supervision
+                # IMPROVED: Use both loss comparison AND diversity encouragement
                 expert_losses_tensor = torch.stack(expert_losses)
+                
+                # Find best expert for each sample
                 best_expert_indices = torch.argmin(expert_losses_tensor.unsqueeze(0).expand(batch_size, -1), dim=1)
                 
-                # Routing loss: encourage router to choose the best expert
+                # STRONGER routing supervision: Cross entropy + confidence penalty
                 routing_loss = F.cross_entropy(routing_logits, best_expert_indices)
+                
+                # Add diversity loss to prevent collapse to single expert
+                expert_usage = F.softmax(routing_logits, dim=1).mean(dim=0)  # Average usage per expert
+                target_usage = torch.ones_like(expert_usage) / len(self.experts)  # Uniform usage
+                diversity_loss = F.kl_div(expert_usage.log(), target_usage, reduction='batchmean')
+                
+                routing_loss = routing_loss + 0.1 * diversity_loss
         
         # For batch processing, we need to group by expert choice
         expert_groups = {}
@@ -183,9 +223,9 @@ class ImageRouterMoE(nn.Module):
             if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
                 batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
         
-        # Add routing loss to total loss (if training)
+        # Add STRONGER routing loss to total loss (increased weight)
         if labels is not None and routing_loss.item() > 0:
-            batch_loss = batch_loss + 0.1 * routing_loss
+            batch_loss = batch_loss + 0.5 * routing_loss  # Increased from 0.1 to 0.5
         
         # Final safety check - ensure ALL outputs have exactly 4 dimensions
         assert batch_pred_boxes.shape[-1] == 4, f"FINAL CHECK FAILED: pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
@@ -525,33 +565,35 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"RouterMoE_{DATASET_NAME}_{date_str}"
     
-    # Training arguments (exactly like train.py)
+    # IMPROVED training arguments for faster convergence
     training_args = TrainingArguments(
         output_dir=output_dir,
         run_name=run_name,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
-        learning_rate=learning_rate,
+        learning_rate=1e-4,  # INCREASED learning rate for router
         weight_decay=weight_decay,
-        warmup_ratio=warmup_ratio,
-        lr_scheduler_type=lr_scheduler_type,
-        lr_scheduler_kwargs=lr_scheduler_kwargs,
+        warmup_ratio=0.1,  # INCREASED warmup
+        lr_scheduler_type='cosine',  # Better scheduler
+        lr_scheduler_kwargs={},
         eval_do_concat_batches=eval_do_concat_batches,
         disable_tqdm=False,
         logging_dir=wandb_dir if wandb_dir else "./logs",
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=save_total_limit,
-        logging_strategy="epoch",
+        logging_strategy="steps",  # More frequent logging
+        logging_steps=10,  # Log every 10 steps
         report_to="all",
         load_best_model_at_end=True,
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
         fp16=torch.cuda.is_available(),
         dataloader_num_workers=dataloader_num_workers,
-        gradient_accumulation_steps=gradient_accumulation_steps,
+        gradient_accumulation_steps=1,  # REDUCED for more frequent updates
         remove_unused_columns=remove_unused_columns,
+        gradient_checkpointing=True,  # Save memory
     )
     
     # Evaluation metrics (same as train.py)
