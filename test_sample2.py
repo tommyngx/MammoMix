@@ -88,7 +88,7 @@ def load_moe_experts(expert_dir, device):
             expert_model.eval()
             models_list.append(expert_model)
             processors_list.append(processor)
-            print(f"Loaded expert from: {path}")
+            #print(f"Loaded expert from: {path}")
         except Exception as e:
             print(f"Failed to load expert from {path}: {e}")
             continue
