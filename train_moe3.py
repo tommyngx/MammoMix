@@ -267,141 +267,105 @@ def load_expert_models(weight_dir, device):
     
     return models, processors
 
-def calculate_map_metrics(predictions, targets, image_processor):
+def calculate_map_metrics(predictions, targets, image_processor, MAX_SIZE=640):
     """
-    Custom mAP calculation to bypass evaluation.py bug.
-    Returns metrics like test_map, test_map_50, test_map_75, etc.
+    Calculate mAP metrics using torchmetrics like evaluation.py.
+    This follows the exact same pattern as evaluation.py compute_metrics function.
     """
     try:
-        from torchvision.ops import box_iou
-        import torch
+        from torchmetrics.functional.detection.map import mean_average_precision
+        from transformers.image_transforms import center_to_corners_format
         
-        all_pred_boxes = []
-        all_pred_scores = []
-        all_pred_labels = []
-        all_target_boxes = []
-        all_target_labels = []
+        def convert_bbox_yolo_to_pascal(boxes, image_size):
+            """Convert YOLO format to Pascal VOC format like evaluation.py."""
+            boxes = center_to_corners_format(boxes)
+            height, width = image_size
+            boxes = boxes * torch.tensor([[width, height, width, height]])
+            return boxes
         
-        # Process each prediction/target pair
-        for pred, target in zip(predictions, targets):
-            # Get predicted boxes and scores
-            if hasattr(pred, 'logits') and hasattr(pred, 'pred_boxes'):
-                # Apply sigmoid to get scores
-                pred_scores = torch.sigmoid(pred.logits[..., 1])  # Cancer class scores
-                pred_boxes = pred.pred_boxes
-                
-                # Filter out low confidence predictions
-                confidence_threshold = 0.5
-                high_conf_mask = pred_scores > confidence_threshold
-                
-                if high_conf_mask.any():
-                    filtered_scores = pred_scores[high_conf_mask]
-                    filtered_boxes = pred_boxes[high_conf_mask]
-                    filtered_labels = torch.ones(len(filtered_scores), dtype=torch.long)  # All cancer class
-                else:
-                    # No confident predictions
-                    filtered_scores = torch.tensor([])
-                    filtered_boxes = torch.zeros((0, 4))
-                    filtered_labels = torch.tensor([], dtype=torch.long)
-                
-                all_pred_boxes.append(filtered_boxes)
-                all_pred_scores.append(filtered_scores)
-                all_pred_labels.append(filtered_labels)
-            
-            # Get target boxes and labels
+        # Prepare data exactly like evaluation.py
+        post_processed_targets = []
+        post_processed_predictions = []
+        
+        # Process targets (ground truth)
+        for target in targets:
             if target and 'boxes' in target and 'class_labels' in target:
-                target_boxes = target['boxes']
-                target_labels = target['class_labels']
-                
-                all_target_boxes.append(target_boxes)
-                all_target_labels.append(target_labels)
+                boxes = torch.tensor(target['boxes'])
+                boxes = convert_bbox_yolo_to_pascal(boxes, [MAX_SIZE, MAX_SIZE])
+                labels = torch.tensor(target['class_labels'])
+                post_processed_targets.append({'boxes': boxes, 'labels': labels})
             else:
-                # No ground truth
-                all_target_boxes.append(torch.zeros((0, 4)))
-                all_target_labels.append(torch.tensor([], dtype=torch.long))
+                # Empty target
+                post_processed_targets.append({
+                    'boxes': torch.zeros((0, 4)), 
+                    'labels': torch.tensor([], dtype=torch.long)
+                })
         
-        # Calculate mAP at different IoU thresholds
-        def calculate_map_at_iou(iou_threshold):
-            total_ap = 0.0
-            num_images = len(all_pred_boxes)
-            
-            for i in range(num_images):
-                pred_boxes = all_pred_boxes[i]
-                pred_scores = all_pred_scores[i]
-                target_boxes = all_target_boxes[i]
+        # Process predictions exactly like evaluation.py
+        for pred in predictions:
+            if hasattr(pred, 'logits') and hasattr(pred, 'pred_boxes'):
+                # Get logits and boxes from model output
+                logits = pred.logits  # Shape: (batch_size, num_queries, num_classes)
+                pred_boxes = pred.pred_boxes  # Shape: (batch_size, num_queries, 4)
                 
-                if len(pred_boxes) == 0 and len(target_boxes) == 0:
-                    # No predictions, no targets - perfect
-                    total_ap += 1.0
-                elif len(target_boxes) == 0:
-                    # Predictions but no targets - false positives
-                    total_ap += 0.0
-                elif len(pred_boxes) == 0:
-                    # No predictions but have targets - false negatives
-                    total_ap += 0.0
-                else:
-                    # Calculate IoU between predictions and targets
-                    if len(pred_boxes) > 0 and len(target_boxes) > 0:
-                        ious = box_iou(pred_boxes, target_boxes)
-                        
-                        # Find best matches
-                        max_ious, _ = ious.max(dim=1)
-                        matches = max_ious >= iou_threshold
-                        
-                        if len(target_boxes) > 0:
-                            # Simple AP calculation
-                            true_positives = matches.sum().float()
-                            precision = true_positives / len(pred_boxes) if len(pred_boxes) > 0 else 0.0
-                            recall = true_positives / len(target_boxes) if len(target_boxes) > 0 else 0.0
-                            
-                            # Simple AP approximation
-                            if precision > 0 and recall > 0:
-                                ap = (precision + recall) / 2.0
-                            else:
-                                ap = 0.0
-                            
-                            total_ap += ap
-                        else:
-                            total_ap += 0.0
+                # Process each sample in the batch
+                for i in range(logits.shape[0]):
+                    sample_logits = logits[i]  # Shape: (num_queries, num_classes) 
+                    sample_boxes = pred_boxes[i]  # Shape: (num_queries, 4)
+                    
+                    # Apply post-processing like evaluation.py
+                    from dataclasses import dataclass
+                    
+                    @dataclass
+                    class ModelOutput:
+                        logits: torch.Tensor
+                        pred_boxes: torch.Tensor
+                    
+                    # Create model output for post-processing
+                    output = ModelOutput(
+                        logits=sample_logits.unsqueeze(0),  # Add batch dim back
+                        pred_boxes=sample_boxes.unsqueeze(0)  # Add batch dim back
+                    )
+                    
+                    # Target size for post-processing
+                    target_sizes = torch.tensor([[MAX_SIZE, MAX_SIZE]])
+                    
+                    # Post-process using image_processor like evaluation.py
+                    post_processed_output = image_processor.post_process_object_detection(
+                        output, threshold=0.5, target_sizes=target_sizes
+                    )
+                    
+                    # Add to predictions list
+                    if post_processed_output:
+                        post_processed_predictions.append(post_processed_output[0])
                     else:
-                        total_ap += 0.0
-            
-            return total_ap / num_images if num_images > 0 else 0.0
+                        # Empty prediction
+                        post_processed_predictions.append({
+                            'boxes': torch.zeros((0, 4)),
+                            'scores': torch.tensor([]),
+                            'labels': torch.tensor([], dtype=torch.long)
+                        })
+            else:
+                # Handle single sample prediction without batch dimension
+                post_processed_predictions.append({
+                    'boxes': torch.zeros((0, 4)),
+                    'scores': torch.tensor([]),
+                    'labels': torch.tensor([], dtype=torch.long)
+                })
         
-        # Calculate mAP at different IoU thresholds
-        map_50 = calculate_map_at_iou(0.5)
-        map_75 = calculate_map_at_iou(0.75)
+        # Calculate mAP using torchmetrics exactly like evaluation.py
+        metrics = mean_average_precision(post_processed_predictions, post_processed_targets)
         
-        # Calculate average mAP over IoU range 0.5:0.95
-        map_scores = []
-        for iou_thresh in [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]:
-            map_scores.append(calculate_map_at_iou(iou_thresh))
-        map_avg = sum(map_scores) / len(map_scores)
+        # Remove unwanted metrics like evaluation.py
+        if 'map_per_class' in metrics:
+            metrics.pop('map_per_class')
         
-        # Calculate size-based mAP (simplified)
-        def calculate_size_based_map():
-            # For simplicity, assume medium and large detections
-            # In a real implementation, you would categorize based on box areas
-            return {
-                'small': 0.0,  # Usually very few small objects in medical images
-                'medium': map_50 * 0.7,  # Approximate
-                'large': map_50 * 1.1    # Approximate
-            }
-        
-        size_maps = calculate_size_based_map()
-        
-        return {
-            'map': map_avg,
-            'map_50': map_50,
-            'map_75': map_75,
-            'map_small': size_maps['small'],
-            'map_medium': size_maps['medium'],
-            'map_large': size_maps['large']
-        }
+        # Return only mAP metrics like evaluation.py
+        return {k: v.item() if torch.is_tensor(v) else v for k, v in metrics.items() if k.startswith('map')}
         
     except Exception as e:
-        print(f"Custom mAP calculation failed: {e}")
-        # Return default values
+        print(f"torchmetrics mAP calculation failed: {e}")
+        # Fallback to simple calculation
         return {
             'map': 0.0,
             'map_50': 0.0,
@@ -412,7 +376,7 @@ def calculate_map_metrics(predictions, targets, image_processor):
         }
 
 def run_inference_and_calculate_map(model, test_dataset, image_processor, device):
-    """Run inference on test dataset and calculate mAP metrics."""
+    """Run inference on test dataset and calculate mAP metrics using torchmetrics."""
     from torch.utils.data import DataLoader
     
     model.eval()
@@ -420,7 +384,7 @@ def run_inference_and_calculate_map(model, test_dataset, image_processor, device
     # Create data loader
     test_loader = DataLoader(
         test_dataset, 
-        batch_size=1,  # Process one by one for simplicity
+        batch_size=8,  # Process in batches for efficiency
         shuffle=False, 
         collate_fn=collate_fn
     )
@@ -449,7 +413,7 @@ def run_inference_and_calculate_map(model, test_dataset, image_processor, device
             all_predictions.append(output)
             all_targets.extend(labels if labels else [{}])
     
-    # Calculate mAP metrics
+    # Calculate mAP metrics using torchmetrics
     map_metrics = calculate_map_metrics(all_predictions, all_targets, image_processor)
     
     return map_metrics
