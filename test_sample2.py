@@ -196,23 +196,16 @@ def evaluate_model(model, test_dataset, image_processor, config, device, model_n
     print(f"\n=== Testing {model_name} ===")
     
     try:
-        # Test single batch first with labels to ensure loss is computed
+        # Test single batch first
         debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
         debug_batch = next(iter(debug_loader))
         
         with torch.no_grad():
-            # Test with labels to ensure loss is computed properly
-            output = model(debug_batch['pixel_values'].to(device), labels=debug_batch['labels'])
+            output = model(debug_batch['pixel_values'].to(device))
             if output.pred_boxes.shape[-1] != 4:
                 print(f"ISSUE: {model_name} pred_boxes wrong shape: {output.pred_boxes.shape}")
             else:
                 print(f"{model_name} output validation: pred_boxes shape OK {output.pred_boxes.shape}")
-            
-            # Check if loss is present
-            if hasattr(output, 'loss') and output.loss is not None:
-                print(f"{model_name} loss validation: OK (loss = {output.loss.item():.4f})")
-            else:
-                print(f"WARNING: {model_name} missing loss attribute")
             
             # For MoE, do additional validation
             if "moe" in model_name.lower():
@@ -232,6 +225,7 @@ def evaluate_model(model, test_dataset, image_processor, config, device, model_n
                     print(f"  Direct post-processing test: SUCCESS")
                 except Exception as e:
                     print(f"  Direct post-processing test: FAILED - {e}")
+                    # Try to understand what's wrong
                     print(f"    pred_boxes sample: {output.pred_boxes[0, 0, :]}")
                     print(f"    pred_boxes requires_grad: {output.pred_boxes.requires_grad}")
         
