@@ -98,6 +98,8 @@ class ImageRouterMoE(nn.Module):
             for expert_idx in range(len(self.experts)):
                 with torch.no_grad():
                     expert_output = self.experts[expert_idx](pixel_values, labels=labels)
+                    # CRITICAL: Fix dimensions immediately after getting expert output
+                    expert_output = self._fix_expert_output_dimensions(expert_output)
                     if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                         expert_losses.append(expert_output.loss)
             
@@ -127,16 +129,8 @@ class ImageRouterMoE(nn.Module):
         
         with torch.no_grad():
             reference_output = self.experts[first_expert_idx](first_expert_pixel_values, labels=first_expert_labels)
-        
-        # CRITICAL: Fix pred_boxes dimensions immediately from reference output
-        if reference_output.pred_boxes.shape[-1] != 4:
-            print(f"WARNING: Reference expert pred_boxes has {reference_output.pred_boxes.shape[-1]} dims, fixing to 4")
-            reference_output = type(reference_output)(
-                loss=reference_output.loss,
-                logits=reference_output.logits,
-                pred_boxes=reference_output.pred_boxes[..., :4].contiguous(),
-                last_hidden_state=reference_output.last_hidden_state if hasattr(reference_output, 'last_hidden_state') else None
-            )
+            # CRITICAL: Fix dimensions immediately
+            reference_output = self._fix_expert_output_dimensions(reference_output)
         
         # Initialize output tensors with correct dtypes and shapes from reference
         num_queries = reference_output.logits.shape[1]
@@ -175,16 +169,8 @@ class ImageRouterMoE(nn.Module):
             # Get expert output
             with torch.no_grad():
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-            
-            # CRITICAL: Fix pred_boxes dimensions before using the output
-            if expert_output.pred_boxes.shape[-1] != 4:
-                print(f"WARNING: Expert {expert_idx} pred_boxes has {expert_output.pred_boxes.shape[-1]} dims, fixing to 4")
-                expert_output = type(expert_output)(
-                    loss=expert_output.loss,
-                    logits=expert_output.logits,
-                    pred_boxes=expert_output.pred_boxes[..., :4].contiguous(),
-                    last_hidden_state=expert_output.last_hidden_state if hasattr(expert_output, 'last_hidden_state') else None
-                )
+                # CRITICAL: Fix dimensions immediately after getting expert output
+                expert_output = self._fix_expert_output_dimensions(expert_output)
             
             # Place expert outputs back into batch positions
             batch_logits[sample_indices] = expert_output.logits
@@ -221,9 +207,22 @@ class ImageRouterMoE(nn.Module):
         else:
             return combined_output
     
-    def _combine_batch_outputs(self, batch_outputs):
-        """This method is no longer needed - we process by expert groups instead."""
-        pass
+    def _fix_expert_output_dimensions(self, expert_output):
+        """
+        Centralized method to fix expert output dimensions.
+        Ensures pred_boxes always has exactly 4 dimensions.
+        """
+        if expert_output.pred_boxes.shape[-1] != 4:
+            print(f"FIXING: Expert pred_boxes has {expert_output.pred_boxes.shape[-1]} dims, fixing to 4")
+            # Create a new output object with fixed dimensions
+            fixed_output = type(expert_output)(
+                loss=expert_output.loss,
+                logits=expert_output.logits,
+                pred_boxes=expert_output.pred_boxes[..., :4].contiguous(),
+                last_hidden_state=expert_output.last_hidden_state if hasattr(expert_output, 'last_hidden_state') else None
+            )
+            return fixed_output
+        return expert_output
 
 def load_expert_models(weight_dir, device):
     """Load the 3 expert models (similar to train.py model loading)."""
