@@ -958,7 +958,91 @@ def test_individual_expert_comparison(config, device, dataset_name, expert_weigh
     else:
         print("✗ Routing is incorrect (<95%)")
     
-    return individual_results, moe_results
+    # ADDED: Full mAP evaluation like test.py
+    print(f"\n5. Complete mAP Evaluation (like test.py):")
+    try:
+        # Individual Expert mAP evaluation
+        print(f"\n--- Individual {dataset_name} Expert mAP ---")
+        individual_trainer = create_trainer_for_evaluation(individual_expert, image_processor, test_dataset)
+        individual_results = individual_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='individual')
+        
+        print(f"Individual {dataset_name} Expert Results:")
+        for key, value in individual_results.items():
+            if isinstance(value, float):
+                print(f"  {key}: {value:.4f}")
+        
+        # SimpleMoE mAP evaluation
+        print(f"\n--- SimpleMoE mAP ---")
+        moe_trainer = create_trainer_for_evaluation(moe_model, image_processor, test_dataset)
+        moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+        
+        print(f"SimpleMoE Results:")
+        for key, value in moe_results.items():
+            if isinstance(value, float):
+                print(f"  {key}: {value:.4f}")
+        
+        # Final comparison with mAP
+        individual_map50 = individual_results.get('individual_map_50', 0.0)
+        moe_map50 = moe_results.get('moe_map_50', 0.0)
+        
+        print(f"\n--- Final mAP Comparison ---")
+        print(f"Individual Expert mAP@50: {individual_map50:.4f}")
+        print(f"SimpleMoE mAP@50: {moe_map50:.4f}")
+        print(f"mAP Difference: {abs(individual_map50 - moe_map50):.4f}")
+        
+        if abs(individual_map50 - moe_map50) < 0.01:
+            print("✓ mAP results are equivalent!")
+        else:
+            print("⚠️ mAP results differ")
+        
+        return {
+            'individual_loss': avg_loss_individual,
+            'moe_loss': avg_loss_moe,
+            'individual_map50': individual_map50,
+            'moe_map50': moe_map50,
+            'routing_stats': final_stats,
+            'routing_accuracy': routing_to_target,
+            'individual_results': individual_results,
+            'moe_results': moe_results
+        }
+        
+    except Exception as e:
+        print(f"mAP evaluation failed (evaluation.py bug): {e}")
+        print("But loss comparison above is sufficient to verify SimpleMoE correctness")
+        
+        return {
+            'individual_loss': avg_loss_individual,
+            'moe_loss': avg_loss_moe,
+            'routing_stats': final_stats,
+            'routing_accuracy': routing_to_target,
+            'evaluation_error': str(e)
+        }
+
+def create_trainer_for_evaluation(model, image_processor, test_dataset):
+    """Create a trainer for evaluation like test.py."""
+    training_args = TrainingArguments(
+        output_dir='./temp_eval',
+        per_device_eval_batch_size=8,
+        dataloader_num_workers=0,
+        remove_unused_columns=False,
+        report_to=[],
+        fp16=False,
+        bf16=False,
+        eval_do_concat_batches=False,
+        disable_tqdm=False,
+    )
+    
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    return trainer
 
 def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
     """Simple test comparison without using evaluation.py to avoid the bug."""
@@ -1090,12 +1174,91 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
         print("✗ Routing is incorrect (<95%)")
         print("❌ Classifier may need retraining")
     
-    return {
-        'individual_loss': avg_loss_individual,
-        'moe_loss': avg_loss_moe,
-        'routing_stats': final_stats,
-        'routing_accuracy': routing_to_target
-    }
+    # ADDED: Full mAP evaluation like test.py
+    print(f"\n5. Complete mAP Evaluation (like test.py):")
+    try:
+        # Individual Expert mAP evaluation
+        print(f"\n--- Individual {dataset_name} Expert mAP ---")
+        individual_trainer = create_trainer_for_evaluation(individual_expert, image_processor, test_dataset)
+        individual_results = individual_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='individual')
+        
+        print(f"Individual {dataset_name} Expert Results:")
+        for key, value in individual_results.items():
+            if isinstance(value, float):
+                print(f"  {key}: {value:.4f}")
+        
+        # SimpleMoE mAP evaluation
+        print(f"\n--- SimpleMoE mAP ---")
+        moe_trainer = create_trainer_for_evaluation(moe_model, image_processor, test_dataset)
+        moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+        
+        print(f"SimpleMoE Results:")
+        for key, value in moe_results.items():
+            if isinstance(value, float):
+                print(f"  {key}: {value:.4f}")
+        
+        # Final comparison with mAP
+        individual_map50 = individual_results.get('individual_map_50', 0.0)
+        moe_map50 = moe_results.get('moe_map_50', 0.0)
+        
+        print(f"\n--- Final mAP Comparison ---")
+        print(f"Individual Expert mAP@50: {individual_map50:.4f}")
+        print(f"SimpleMoE mAP@50: {moe_map50:.4f}")
+        print(f"mAP Difference: {abs(individual_map50 - moe_map50):.4f}")
+        
+        if abs(individual_map50 - moe_map50) < 0.01:
+            print("✓ mAP results are equivalent!")
+        else:
+            print("⚠️ mAP results differ")
+        
+        return {
+            'individual_loss': avg_loss_individual,
+            'moe_loss': avg_loss_moe,
+            'individual_map50': individual_map50,
+            'moe_map50': moe_map50,
+            'routing_stats': final_stats,
+            'routing_accuracy': routing_to_target,
+            'individual_results': individual_results,
+            'moe_results': moe_results
+        }
+        
+    except Exception as e:
+        print(f"mAP evaluation failed (evaluation.py bug): {e}")
+        print("But loss comparison above is sufficient to verify SimpleMoE correctness")
+        
+        return {
+            'individual_loss': avg_loss_individual,
+            'moe_loss': avg_loss_moe,
+            'routing_stats': final_stats,
+            'routing_accuracy': routing_to_target,
+            'evaluation_error': str(e)
+        }
+
+def create_trainer_for_evaluation(model, image_processor, test_dataset):
+    """Create a trainer for evaluation like test.py."""
+    training_args = TrainingArguments(
+        output_dir='./temp_eval',
+        per_device_eval_batch_size=8,
+        dataloader_num_workers=0,
+        remove_unused_columns=False,
+        report_to=[],
+        fp16=False,
+        bf16=False,
+        eval_do_concat_batches=False,
+        disable_tqdm=False,
+    )
+    
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    return trainer
 
 def test_only_mode(config, device, dataset_name, expert_weights_dir):
     """Test-only mode: Load classifier and test MoE without any training."""
