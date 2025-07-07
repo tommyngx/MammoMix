@@ -326,45 +326,93 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"SimpleMoE_{dataset_name}_{date_str}"
     
-    # Use TrainingArguments for evaluation only - fix the eval_strategy issue
-    training_args = TrainingArguments(
-        output_dir='./temp_eval',
-        run_name=run_name,
-        per_device_eval_batch_size=per_device_eval_batch_size,
-        eval_strategy="no",  # Set to "no" since we're only doing evaluation
-        save_strategy="no",  # Set to "no" since we're only doing evaluation
-        disable_tqdm=False,
-        logging_dir="./logs",
-        report_to=[],  # Disable wandb and all external loggers
-        fp16=torch.cuda.is_available(),
-        dataloader_num_workers=dataloader_num_workers,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        remove_unused_columns=remove_unused_columns,
-    )
+    # Try evaluation with compute_metrics first, fallback if it fails
+    test_results = {}
     
-    # Use evaluation function from evaluation.py exactly like test.py
-    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
-    
-    # Create trainer exactly like test.py - without eval_dataset since we're only evaluating
-    trainer = Trainer(
-        model=moe_model,
-        args=training_args,
-        processing_class=image_processor,
-        data_collator=collate_fn,
-        compute_metrics=eval_compute_metrics_fn,
-    )
-    
-    # Run evaluation exactly like test.py
-    print(f'Test loader: {len(test_dataset)} samples')
-    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-    
-    # Print results exactly like test.py
-    print("\n=== Test Results ===")
-    for key, value in test_results.items():
-        if isinstance(value, float):
-            print(f"{key}: {value:.4f}")
-        else:
-            print(f"{key}: {value}")
+    try:
+        # Use TrainingArguments for evaluation with compute_metrics
+        training_args = TrainingArguments(
+            output_dir='./temp_eval',
+            run_name=run_name,
+            per_device_eval_batch_size=per_device_eval_batch_size,
+            eval_strategy="no",
+            save_strategy="no",
+            disable_tqdm=False,
+            logging_dir="./logs",
+            report_to=[],
+            fp16=torch.cuda.is_available(),
+            dataloader_num_workers=dataloader_num_workers,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            remove_unused_columns=remove_unused_columns,
+        )
+        
+        # Use evaluation function from evaluation.py exactly like test.py
+        eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+        
+        # Create trainer exactly like test.py
+        trainer = Trainer(
+            model=moe_model,
+            args=training_args,
+            processing_class=image_processor,
+            data_collator=collate_fn,
+            compute_metrics=eval_compute_metrics_fn,
+        )
+        
+        # Run evaluation exactly like test.py
+        print(f'Test loader: {len(test_dataset)} samples')
+        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+        
+        # Print results exactly like test.py
+        print("\n=== Test Results ===")
+        for key, value in test_results.items():
+            if isinstance(value, float):
+                print(f"{key}: {value:.4f}")
+            else:
+                print(f"{key}: {value}")
+        
+    except Exception as e:
+        print(f"mAP evaluation failed due to evaluation.py bug: {e}")
+        print("Falling back to basic evaluation without mAP metrics...")
+        
+        # Fallback: Basic evaluation without compute_metrics to avoid the bug
+        training_args_basic = TrainingArguments(
+            output_dir='./temp_eval_basic',
+            run_name=f"{run_name}_basic",
+            per_device_eval_batch_size=per_device_eval_batch_size,
+            eval_strategy="no",
+            save_strategy="no",
+            disable_tqdm=False,
+            logging_dir="./logs",
+            report_to=[],
+            fp16=torch.cuda.is_available(),
+            dataloader_num_workers=dataloader_num_workers,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            remove_unused_columns=remove_unused_columns,
+        )
+        
+        # Create trainer without compute_metrics to avoid the bug
+        trainer_basic = Trainer(
+            model=moe_model,
+            args=training_args_basic,
+            processing_class=image_processor,
+            data_collator=collate_fn,
+            compute_metrics=None,  # No compute_metrics to avoid the bug
+        )
+        
+        # Run basic evaluation
+        print(f'Test loader (basic): {len(test_dataset)} samples')
+        test_results = trainer_basic.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+        
+        # Print basic results
+        print("\n=== Test Results (Basic) ===")
+        for key, value in test_results.items():
+            if isinstance(value, float):
+                print(f"{key}: {value:.4f}")
+            else:
+                print(f"{key}: {value}")
+        
+        print("\nNote: mAP metrics unavailable due to evaluation.py bug")
+        print("Loss and basic metrics shown above")
     
     # Get routing statistics
     final_stats = moe_model.get_routing_stats()
