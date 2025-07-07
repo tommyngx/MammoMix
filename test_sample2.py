@@ -264,154 +264,164 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
             expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM', 'yolos_MOMO']
             expert_paths = [os.path.join(expert_dir, name) for name in expert_names if os.path.exists(os.path.join(expert_dir, name))]
             
-            if expert_paths:
+            print(f"Found expert paths: {expert_paths}")
+            
+            if expert_paths and len(expert_paths) >= 2:
+                # Load expert models for MoE
                 models_list = []
+                processors_list = []
                 for path in expert_paths:
-                    processor = AutoImageProcessor.from_pretrained(path)
-                    expert_model = get_yolos_model(path, processor, 'yolos').to(device)
-                    expert_model.eval()
-                    models_list.append(expert_model)
+                    try:
+                        processor = AutoImageProcessor.from_pretrained(path)
+                        expert_model = get_yolos_model(path, processor, 'yolos').to(device)
+                        expert_model.eval()
+                        models_list.append(expert_model)
+                        processors_list.append(processor)
+                        print(f"Loaded expert from: {path}")
+                    except Exception as e:
+                        print(f"Failed to load expert from {path}: {e}")
+                        continue
                 
                 if len(models_list) >= 2:
-                    integrated_moe = IntegratedMoE(models_list, n_models=len(models_list), top_k=2)
-                    # Load with strict=False to ignore mismatched keys
-                    state_dict = torch.load(moe_model, map_location=device)
-                    missing, unexpected = integrated_moe.load_state_dict(state_dict, strict=False)
-                    integrated_moe.eval().to(device)
-                    moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
+                    # Create and load MoE model
+                    integrated_moe = IntegratedMoE(models_list, n_models=len(models_list), top_k=min(2, len(models_list)))
                     
-                    # Create MoE trainer with same settings
-                    moe_training_args = TrainingArguments(
-                        output_dir='./temp_output',
-                        per_device_eval_batch_size=1,  # Use batch size 1 for MoE to avoid target size mismatch
-                        dataloader_num_workers=0,
-                        remove_unused_columns=False,
-                        report_to=[],
-                        fp16=torch.cuda.is_available(),
-                        eval_do_concat_batches=False,  # Add this to prevent batch concatenation issues
-                    )
+                    # Load MoE weights with proper error handling
+                    try:
+                        state_dict = torch.load(moe_model, map_location=device)
+                        # Filter out mismatched keys
+                        model_keys = set(integrated_moe.state_dict().keys())
+                        filtered_state_dict = {k: v for k, v in state_dict.items() if k in model_keys}
+                        missing, unexpected = integrated_moe.load_state_dict(filtered_state_dict, strict=False)
+                        if missing:
+                            print(f"Missing keys in MoE model: {missing[:5]}...")  # Show first 5
+                        if unexpected:
+                            print(f"Unexpected keys in MoE model: {unexpected[:5]}...")  # Show first 5
+                        integrated_moe.eval().to(device)
+                        print("MoE model loaded successfully")
+                    except Exception as e:
+                        print(f"Failed to load MoE weights: {e}")
+                        return
                     
-                    # Debug: Test MoE model output format
-                    debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
-                    debug_batch = next(iter(debug_loader))
-                    
-                    with torch.no_grad():
-                        moe_output = moe_detector(debug_batch['pixel_values'].to(device))
-                        print(f"DEBUG MoE output:")
-                        print(f"  Logits shape: {moe_output.logits.shape}")
-                        print(f"  Pred boxes shape: {moe_output.pred_boxes.shape}")
-                        print(f"  Pred boxes last dimension: {moe_output.pred_boxes.shape[-1]}")
-                        print(f"  Pred boxes full shape: {list(moe_output.pred_boxes.shape)}")
-                        print(f"  Output type: {type(moe_output)}")
-                        print(f"  Has pred_boxes attr: {hasattr(moe_output, 'pred_boxes')}")
-                        print(f"  Has loss attr: {hasattr(moe_output, 'loss')}")
-                        print(f"  Has last_hidden_state attr: {hasattr(moe_output, 'last_hidden_state')}")
-                        
-                        # Compare with expert
-                        print(f"DEBUG Comparison:")
-                        print(f"  Expert pred_boxes shape: {expert_output.pred_boxes.shape}")
-                        print(f"  Expert pred_boxes last dim: {expert_output.pred_boxes.shape[-1]}")
-                        print(f"  MoE pred_boxes shape: {moe_output.pred_boxes.shape}")
-                        print(f"  MoE pred_boxes last dim: {moe_output.pred_boxes.shape[-1]}")
-
-                    # Create a wrapper for MoE model that adds missing loss and last_hidden_state
-                    class MoEModelWithLoss(torch.nn.Module):
-                        def __init__(self, moe_model):
+                    # Create MoE detector wrapper
+                    class ValidatedMoEObjectDetectionModel(torch.nn.Module):
+                        def __init__(self, moe_model, reference_processor):
                             super().__init__()
                             self.moe_model = moe_model
+                            self.reference_processor = reference_processor
                             
                         def forward(self, pixel_values, labels=None):
-                            outputs = self.moe_model(pixel_values)
+                            # Get MoE output
+                            moe_output = self.moe_model(pixel_values)
                             
-                            # Create output that matches expert model exactly
+                            # Ensure output has proper structure for validation
                             from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
                             
-                            # Add missing components to match expert output
-                            loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=True) if not hasattr(outputs, 'loss') or outputs.loss is None else outputs.loss
+                            # Handle logits - ensure proper shape
+                            logits = moe_output.logits if hasattr(moe_output, 'logits') else moe_output['logits']
+                            if logits.dim() == 2:
+                                logits = logits.unsqueeze(0)  # Add batch dimension if missing
                             
-                            # Create dummy last_hidden_state if missing (same shape as expert)
-                            if not hasattr(outputs, 'last_hidden_state'):
-                                # Create dummy last_hidden_state with appropriate shape
-                                batch_size, num_queries, hidden_size = outputs.logits.shape[0], outputs.logits.shape[1], 256
-                                last_hidden_state = torch.zeros(batch_size, num_queries, hidden_size, device=outputs.logits.device)
-                            else:
-                                last_hidden_state = outputs.last_hidden_state
+                            # Handle pred_boxes - ensure shape [batch_size, num_queries, 4]
+                            pred_boxes = moe_output.pred_boxes if hasattr(moe_output, 'pred_boxes') else moe_output['pred_boxes']
+                            if pred_boxes.dim() == 2:
+                                pred_boxes = pred_boxes.unsqueeze(0)  # Add batch dimension if missing
                             
-                            # Fix pred_boxes shape - ensure exactly 4 dimensions in last axis
-                            pred_boxes = outputs.pred_boxes
-                            print(f"DEBUG MoE pred_boxes before fix: shape={pred_boxes.shape}")
-                            
-                            if len(pred_boxes.shape) > 3:
-                                # If there are extra dimensions, take only the first 4 of the last dimension
-                                pred_boxes = pred_boxes[..., :4]
-                                print(f"DEBUG MoE pred_boxes after slice: shape={pred_boxes.shape}")
-                            elif pred_boxes.shape[-1] != 4:
-                                print(f"WARNING: pred_boxes last dimension is {pred_boxes.shape[-1]}, expected 4")
+                            # Ensure pred_boxes has exactly 4 coordinates
+                            if pred_boxes.shape[-1] != 4:
                                 if pred_boxes.shape[-1] > 4:
                                     pred_boxes = pred_boxes[..., :4]
                                 else:
                                     # Pad with zeros if less than 4
+                                    batch_size, num_queries = pred_boxes.shape[:2]
                                     padding_size = 4 - pred_boxes.shape[-1]
-                                    padding = torch.zeros(*pred_boxes.shape[:-1], padding_size, device=pred_boxes.device)
+                                    padding = torch.zeros(batch_size, num_queries, padding_size, 
+                                                        device=pred_boxes.device, dtype=pred_boxes.dtype)
                                     pred_boxes = torch.cat([pred_boxes, padding], dim=-1)
-                                print(f"DEBUG MoE pred_boxes after fix: shape={pred_boxes.shape}")
                             
-                            # Verify final shape
-                            assert pred_boxes.shape[-1] == 4, f"pred_boxes final shape {pred_boxes.shape} doesn't end with 4"
+                            # Create loss (dummy for evaluation)
+                            loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=False)
                             
-                            # Return YolosObjectDetectionOutput with all required fields
+                            # Create last_hidden_state (dummy for evaluation)
+                            batch_size, num_queries = logits.shape[:2]
+                            hidden_size = 768  # Standard YOLOS hidden size
+                            last_hidden_state = torch.zeros(batch_size, num_queries, hidden_size, 
+                                                           device=logits.device, dtype=logits.dtype)
+                            
                             return YolosObjectDetectionOutput(
                                 loss=loss,
-                                logits=outputs.logits,
+                                logits=logits,
                                 pred_boxes=pred_boxes,
                                 last_hidden_state=last_hidden_state
                             )
                     
-                    # Wrap MoE model to ensure it has same output format as expert
-                    moe_model_with_loss = MoEModelWithLoss(moe_detector).to(device)
+                    # Create validated MoE model
+                    moe_detector = ValidatedMoEObjectDetectionModel(
+                        MoEObjectDetectionModel(integrated_moe), 
+                        image_processor
+                    ).to(device)
                     
-                    # Test the wrapped model
+                    # Test MoE output format before evaluation
+                    print("Testing MoE output format...")
+                    from torch.utils.data import DataLoader
+                    debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+                    debug_batch = next(iter(debug_loader))
+                    
                     with torch.no_grad():
-                        test_output = moe_model_with_loss(debug_batch['pixel_values'].to(device))
-                        print(f"DEBUG Wrapped MoE output:")
-                        print(f"  Output type: {type(test_output)}")
-                        print(f"  Has loss attr: {hasattr(test_output, 'loss')}")
-                        print(f"  Has last_hidden_state attr: {hasattr(test_output, 'last_hidden_state')}")
-                        print(f"  Output keys: {list(test_output.keys()) if hasattr(test_output, 'keys') else 'No keys method'}")
-                        print(f"  Loss value: {test_output.loss}")
+                        test_output = moe_detector(debug_batch['pixel_values'].to(device))
+                        print(f"MoE Output validation:")
+                        print(f"  Type: {type(test_output)}")
                         print(f"  Logits shape: {test_output.logits.shape}")
                         print(f"  Pred boxes shape: {test_output.pred_boxes.shape}")
-                        print(f"  Last hidden state shape: {test_output.last_hidden_state.shape if hasattr(test_output, 'last_hidden_state') else 'None'}")
-
-                    # Create MoE trainer with wrapped model
+                        print(f"  Has loss: {hasattr(test_output, 'loss')}")
+                        print(f"  Has last_hidden_state: {hasattr(test_output, 'last_hidden_state')}")
+                        
+                        # Validate shapes match expert output
+                        expert_test_output = model(debug_batch['pixel_values'].to(device))
+                        logits_match = test_output.logits.shape == expert_test_output.logits.shape
+                        boxes_match = test_output.pred_boxes.shape == expert_test_output.pred_boxes.shape
+                        print(f"  Logits shape match with expert: {logits_match}")
+                        print(f"  Pred boxes shape match with expert: {boxes_match}")
+                        
+                        if not (logits_match and boxes_match):
+                            print(f"  Expert logits shape: {expert_test_output.logits.shape}")
+                            print(f"  Expert pred boxes shape: {expert_test_output.pred_boxes.shape}")
+                            raise ValueError("MoE output shapes don't match expert model")
+                    
+                    # Create MoE trainer with same settings as expert
+                    moe_training_args = TrainingArguments(
+                        output_dir='./temp_moe_output',
+                        per_device_eval_batch_size=per_device_eval_batch_size,
+                        dataloader_num_workers=0,
+                        remove_unused_columns=False,
+                        report_to=[],
+                        fp16=torch.cuda.is_available(),
+                        eval_do_concat_batches=False,
+                    )
+                    
                     moe_trainer = Trainer(
-                        model=moe_model_with_loss,
+                        model=moe_detector,
                         args=moe_training_args,
                         processing_class=image_processor,
                         data_collator=collate_fn,
                         compute_metrics=eval_compute_metrics_fn,
                     )
                     
-                    # Evaluate MoE using trainer.evaluate
-                    try:
-                        print("Using trainer.evaluate for MoE...")
-                        moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
-                        print(f"\n=== MoE Test Results ===")
-                        for key, value in moe_results.items():
-                            if isinstance(value, float):
-                                print(f"{key}: {value:.4f}")
-                            else:
-                                print(f"{key}: {value}")
-                    except Exception as e:
-                        print(f"MoE evaluation failed: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        moe_results = None
-
+                    # Evaluate MoE model
+                    print("Evaluating MoE model...")
+                    moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+                    
+                    print(f"\n=== MoE Test Results ===")
+                    for key, value in moe_results.items():
+                        if isinstance(value, float):
+                            print(f"{key}: {value:.4f}")
+                        else:
+                            print(f"{key}: {value}")
+                            
                 else:
-                    print("Error: Need at least 2 expert models for MoE")
+                    print(f"Error: Need at least 2 expert models for MoE, found {len(models_list)}")
             else:
-                print("Error: No expert models found")
+                print("Error: No valid expert models found or insufficient number of experts")
                 
         except Exception as e:
             print(f"MoE testing failed: {e}")
