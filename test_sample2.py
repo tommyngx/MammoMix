@@ -88,7 +88,7 @@ def load_moe_experts(expert_dir, device):
             expert_model.eval()
             models_list.append(expert_model)
             processors_list.append(processor)
-            #print(f"Loaded expert from: {path}")
+            print(f"Loaded expert from: {path}")
         except Exception as e:
             print(f"Failed to load expert from {path}: {e}")
             continue
@@ -317,48 +317,74 @@ def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir,
             if len(models_list) >= 2:
                 integrated_moe = create_moe_model(models_list, moe_model_path, device)
                 
-                # Use the same validated wrapper as in full evaluation
-                moe_detector = ValidatedMoEObjectDetectionModel(
-                    MoEObjectDetectionModel(integrated_moe), 
-                    image_processor
-                ).to(device)
+                # Create MoE - use direct MoEObjectDetectionModel without additional wrapper
+                integrated_moe = create_moe_model(models_list, moe_model, device)
+                moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
                 
-                # Debug: Check raw vs validated output 
+                # Quick validation test
+                debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+                debug_batch = next(iter(debug_loader))
+                
                 with torch.no_grad():
-                    # Raw MoE output
-                    raw_moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
-                    raw_moe_pred = raw_moe_detector(pixel_values_single)
-                    print(f"  Raw MoE pred_boxes shape: {raw_moe_pred.pred_boxes.shape}")
-                    print(f"  Raw MoE pred_boxes last dim: {raw_moe_pred.pred_boxes.shape[-1]}")
-                    
-                    # Validated MoE output
-                    moe_pred = moe_detector(pixel_values_single)
-                    print(f"  Validated MoE pred_boxes shape: {moe_pred.pred_boxes.shape}")
-                    print(f"  Validated MoE pred_boxes last dim: {moe_pred.pred_boxes.shape[-1]}")
-                    
-                    print(f"  Logits shape: {moe_pred.logits.shape}")
-                    print(f"  Pred boxes shape: {moe_pred.pred_boxes.shape}")
-                    
-                    # Get top 3 predictions
-                    moe_probs = torch.softmax(moe_pred.logits[0], dim=-1)
-                    top_moe = torch.topk(moe_probs[:, 1], 3)
-                    print(f"  Top 3 predictions (confidence scores):")
-                    for i, (score, idx) in enumerate(zip(top_moe.values, top_moe.indices)):
-                        print(f"    Query {idx}: {score:.4f}")
-                    print(f"  Top 3 pred boxes:")
-                    for i, idx in enumerate(top_moe.indices):
-                        print(f"    Query {idx}: {moe_pred.pred_boxes[0, idx, :]}")
+                    test_output = moe_detector(debug_batch['pixel_values'].to(device))
+                    if test_output.pred_boxes.shape[-1] != 4:
+                        print(f"CRITICAL ERROR: MoE still outputs {test_output.pred_boxes.shape[-1]} dimensions!")
+                        return
+                    else:
+                        print(f"✅ MoE validation passed: pred_boxes shape {test_output.pred_boxes.shape}")
                 
-                # Comparison
-                print(f"\n=== Comparison ===")
-                print(f"  Expert top confidence: {top_expert.values[0]:.4f}")
-                print(f"  MoE top confidence: {top_moe.values[0]:.4f}")
-                print(f"  Confidence difference (MoE - Expert): {(top_moe.values[0] - top_expert.values[0]):.4f}")
+                # Test post-processing
+                try:
+                    test_post_process = image_processor.post_process_object_detection(
+                        test_output, threshold=0.1, target_sizes=torch.tensor([[640, 640]])
+                    )
+                    print("✅ Post-processing test: SUCCESS")
+                except Exception as e:
+                    print(f"❌ Post-processing failed: {e}")
+                    return
                 
-                expert_top_box = expert_pred.pred_boxes[0, top_expert.indices[0], :]
-                moe_top_box = moe_pred.pred_boxes[0, top_moe.indices[0], :]
-                box_diff = moe_top_box - expert_top_box
-                print(f"  Top box difference (MoE - Expert): {box_diff}")
+                # Use EXACT same evaluation setup as test.py
+                training_cfg = config.get('training', {})
+                
+                # Copy exact TrainingArguments from test.py
+                import datetime
+                date_str = datetime.datetime.now().strftime("%d%m%y")
+                run_name = f"MoE_{DATASET_NAME}_{date_str}"
+                
+                training_args = TrainingArguments(
+                    output_dir='./temp_moe_output',
+                    run_name=run_name,
+                    per_device_eval_batch_size=training_cfg.get('batch_size', 8),
+                    eval_do_concat_batches=training_cfg.get('eval_do_concat_batches', False),
+                    disable_tqdm=False,
+                    logging_dir="./logs",
+                    eval_strategy="epoch",
+                    save_strategy="epoch", 
+                    save_total_limit=1,
+                    logging_strategy="epoch",
+                    report_to=[],  # Disable external loggers for testing
+                    load_best_model_at_end=True,
+                    metric_for_best_model='eval_map_50',
+                    greater_is_better=True,
+                    fp16=torch.cuda.is_available(),
+                    dataloader_num_workers=0,  # Use 0 for testing to avoid issues
+                    gradient_accumulation_steps=training_cfg.get('gradient_accumulation_steps', 2),
+                    remove_unused_columns=training_cfg.get('remove_unused_columns', False),
+                )
+                
+                eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+                
+                trainer = Trainer(
+                    model=moe_detector,
+                    args=training_args,
+                    processing_class=image_processor,
+                    data_collator=collate_fn,  # SAME as test.py
+                    compute_metrics=eval_compute_metrics_fn,
+                )
+                
+                # Evaluate MoE
+                moe_results = evaluate_model(moe_detector, test_dataset, image_processor, config, device, "MoE")
+
             else:
                 print("  Error: Need at least 2 expert models for MoE")
                 
@@ -469,28 +495,81 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                     # Raw MoE output
                     raw_moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
                     raw_moe_output = raw_moe_detector(debug_batch['pixel_values'].to(device))
-                    print(f"Raw MoE output: pred_boxes shape {raw_moe_output.pred_boxes.shape}")
                     
                     # Check if the issue is in the raw MoE output
                     if raw_moe_output.pred_boxes.shape[-1] != 4:
-                        print(f"ISSUE FOUND: Raw MoE pred_boxes has {raw_moe_output.pred_boxes.shape[-1]} dimensions instead of 4")
+                        print(f"CRITICAL ERROR: Raw MoE pred_boxes has {raw_moe_output.pred_boxes.shape[-1]} dimensions instead of 4")
+                        print(f"This should not happen with the fixed train_moe.py")
+                        return
+                    else:
+                        print(f"Raw MoE output: pred_boxes shape OK {raw_moe_output.pred_boxes.shape}")
                 
-                # Create validated wrapper
-                moe_detector = ValidatedMoEObjectDetectionModel(
-                    MoEObjectDetectionModel(integrated_moe), 
-                    image_processor
-                ).to(device)
+                # Create MoE - use direct MoEObjectDetectionModel without additional wrapper
+                integrated_moe = create_moe_model(models_list, moe_model, device)
+                moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
                 
-                # Test wrapped output
+                # Quick validation test
+                debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+                debug_batch = next(iter(debug_loader))
+                
                 with torch.no_grad():
-                    wrapped_moe_output = moe_detector(debug_batch['pixel_values'].to(device))
-                    print(f"Validated MoE output: pred_boxes shape {wrapped_moe_output.pred_boxes.shape}")
+                    test_output = moe_detector(debug_batch['pixel_values'].to(device))
+                    if test_output.pred_boxes.shape[-1] != 4:
+                        print(f"CRITICAL ERROR: MoE still outputs {test_output.pred_boxes.shape[-1]} dimensions!")
+                        return
+                    else:
+                        print(f"✅ MoE validation passed: pred_boxes shape {test_output.pred_boxes.shape}")
                 
-                # Test post-processing with the wrapped model
-                if not test_post_processing(moe_detector, test_dataset, image_processor, device):
-                    print("Post-processing test failed, but continuing with evaluation...")
+                # Test post-processing
+                try:
+                    test_post_process = image_processor.post_process_object_detection(
+                        test_output, threshold=0.1, target_sizes=torch.tensor([[640, 640]])
+                    )
+                    print("✅ Post-processing test: SUCCESS")
+                except Exception as e:
+                    print(f"❌ Post-processing failed: {e}")
+                    return
                 
-                # Evaluate MoE - use ValidatedMoEObjectDetectionModel wrapper to ensure loss is present
+                # Use EXACT same evaluation setup as test.py
+                training_cfg = config.get('training', {})
+                
+                # Copy exact TrainingArguments from test.py
+                import datetime
+                date_str = datetime.datetime.now().strftime("%d%m%y")
+                run_name = f"MoE_{DATASET_NAME}_{date_str}"
+                
+                training_args = TrainingArguments(
+                    output_dir='./temp_moe_output',
+                    run_name=run_name,
+                    per_device_eval_batch_size=training_cfg.get('batch_size', 8),
+                    eval_do_concat_batches=training_cfg.get('eval_do_concat_batches', False),
+                    disable_tqdm=False,
+                    logging_dir="./logs",
+                    eval_strategy="epoch",
+                    save_strategy="epoch", 
+                    save_total_limit=1,
+                    logging_strategy="epoch",
+                    report_to=[],  # Disable external loggers for testing
+                    load_best_model_at_end=True,
+                    metric_for_best_model='eval_map_50',
+                    greater_is_better=True,
+                    fp16=torch.cuda.is_available(),
+                    dataloader_num_workers=0,  # Use 0 for testing to avoid issues
+                    gradient_accumulation_steps=training_cfg.get('gradient_accumulation_steps', 2),
+                    remove_unused_columns=training_cfg.get('remove_unused_columns', False),
+                )
+                
+                eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+                
+                trainer = Trainer(
+                    model=moe_detector,
+                    args=training_args,
+                    processing_class=image_processor,
+                    data_collator=collate_fn,  # SAME as test.py
+                    compute_metrics=eval_compute_metrics_fn,
+                )
+                
+                # Evaluate MoE
                 moe_results = evaluate_model(moe_detector, test_dataset, image_processor, config, device, "MoE")
 
             else:

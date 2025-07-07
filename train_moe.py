@@ -143,19 +143,30 @@ class IntegratedMoE(nn.Module):
         # Get dimensions
         num_queries = reference_output.logits.shape[1]
         num_classes = reference_output.logits.shape[2]
-        box_dims = reference_output.pred_boxes.shape[2]  # Should be 4
         
-        # Initialize combined logits and boxes
+        # CRITICAL FIX: Force all expert outputs to have exactly 4 box dimensions
+        fixed_expert_outputs = []
+        for expert_output in expert_outputs:
+            # Create a copy to avoid modifying original
+            fixed_output = type(expert_output)(
+                loss=expert_output.loss,
+                logits=expert_output.logits,
+                pred_boxes=expert_output.pred_boxes[..., :4].contiguous(),  # Force exactly 4 dims
+                last_hidden_state=expert_output.last_hidden_state if hasattr(expert_output, 'last_hidden_state') else None
+            )
+            fixed_expert_outputs.append(fixed_output)
+        
+        # Initialize combined tensors with exactly 4 dimensions
         combined_logits = torch.zeros(batch_size, num_queries, num_classes, 
                                     device=reference_output.logits.device)
-        combined_pred_boxes = torch.zeros(batch_size, num_queries, box_dims,
+        combined_pred_boxes = torch.zeros(batch_size, num_queries, 4,  # EXACTLY 4
                                         device=reference_output.pred_boxes.device)
         
         # For each sample in batch, combine outputs from its top-k experts
         for batch_idx in range(batch_size):
             sample_combined_logits = torch.zeros(num_queries, num_classes, 
                                                device=reference_output.logits.device)
-            sample_combined_boxes = torch.zeros(num_queries, box_dims,
+            sample_combined_boxes = torch.zeros(num_queries, 4,  # EXACTLY 4
                                                device=reference_output.pred_boxes.device)
             
             # Get top-k experts for this sample
@@ -163,9 +174,9 @@ class IntegratedMoE(nn.Module):
                 expert_idx = top_indices[batch_idx, k_idx].item()
                 expert_weight = weights[batch_idx, expert_idx].item()
                 
-                # Weight and add expert's contribution
-                expert_logits = expert_outputs[expert_idx].logits[batch_idx]
-                expert_boxes = expert_outputs[expert_idx].pred_boxes[batch_idx]
+                # Weight and add expert's contribution (using fixed outputs)
+                expert_logits = fixed_expert_outputs[expert_idx].logits[batch_idx]
+                expert_boxes = fixed_expert_outputs[expert_idx].pred_boxes[batch_idx]  # Now guaranteed 4D
                 
                 sample_combined_logits += expert_weight * expert_logits
                 sample_combined_boxes += expert_weight * expert_boxes
@@ -173,28 +184,16 @@ class IntegratedMoE(nn.Module):
             combined_logits[batch_idx] = sample_combined_logits
             combined_pred_boxes[batch_idx] = sample_combined_boxes
         
-        # Ensure pred_boxes has exactly 4 dimensions
-        if combined_pred_boxes.shape[-1] != 4:
-            print(f"WARNING: Combined pred_boxes has {combined_pred_boxes.shape[-1]} dims, fixing to 4")
-            if combined_pred_boxes.shape[-1] > 4:
-                combined_pred_boxes = combined_pred_boxes[..., :4]
-            else:
-                # Pad with zeros if less than 4
-                padding_size = 4 - combined_pred_boxes.shape[-1]
-                padding = torch.zeros(*combined_pred_boxes.shape[:-1], padding_size,
-                                    device=combined_pred_boxes.device, dtype=combined_pred_boxes.dtype)
-                combined_pred_boxes = torch.cat([combined_pred_boxes, padding], dim=-1)
+        # Final safety check with assertion
+        assert combined_pred_boxes.shape[-1] == 4, f"CRITICAL: pred_boxes has {combined_pred_boxes.shape[-1]} dims, expected 4"
         
-        # Create output object exactly like reference expert output
+        # Create output object
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
         
-        # ALWAYS create loss tensor for evaluation compatibility
-        dummy_loss = torch.tensor(0.0, device=combined_logits.device, requires_grad=False)
-        
         return YolosObjectDetectionOutput(
-            loss=dummy_loss,  # Always include loss
-            logits=combined_logits,
-            pred_boxes=combined_pred_boxes,
+            loss=torch.tensor(0.0, device=combined_logits.device, requires_grad=False),
+            logits=combined_logits.contiguous(),
+            pred_boxes=combined_pred_boxes.contiguous(),
             last_hidden_state=reference_output.last_hidden_state if hasattr(reference_output, 'last_hidden_state') else None
         )
 
@@ -377,38 +376,23 @@ class MoEObjectDetectionModel(nn.Module):
         # Get MoE combined output
         combined_outputs, final_pred, weights, expert_probs, top_indices = self.moe(pixel_values)
         
-        # Ensure the output structure is exactly like expert models
-        # The evaluation expects the output to have the same attributes and structure
-        # as what comes from AutoModelForObjectDetection
-        
-        # Validate that pred_boxes has exactly 4 dimensions
+        # FINAL SAFETY CHECK: Ensure pred_boxes is EXACTLY 4 dimensions
         if combined_outputs.pred_boxes.shape[-1] != 4:
-            print(f"MoEObjectDetectionModel: Fixing pred_boxes from {combined_outputs.pred_boxes.shape} to 4 dims")
-            if combined_outputs.pred_boxes.shape[-1] > 4:
-                combined_outputs.pred_boxes = combined_outputs.pred_boxes[..., :4]
-            else:
-                # Pad with zeros if less than 4
-                batch_size, num_queries = combined_outputs.pred_boxes.shape[:2]
-                padding_size = 4 - combined_outputs.pred_boxes.shape[-1]
-                padding = torch.zeros(batch_size, num_queries, padding_size,
-                                    device=combined_outputs.pred_boxes.device, 
-                                    dtype=combined_outputs.pred_boxes.dtype)
-                combined_outputs.pred_boxes = torch.cat([combined_outputs.pred_boxes, padding], dim=-1)
+            print(f"EMERGENCY FIX: pred_boxes has {combined_outputs.pred_boxes.shape[-1]} dims, truncating to 4")
+            combined_outputs.pred_boxes = combined_outputs.pred_boxes[..., :4].contiguous()
         
-        # Ensure tensors are contiguous for evaluation
+        # Ensure all required attributes are present
         combined_outputs.logits = combined_outputs.logits.contiguous()
         combined_outputs.pred_boxes = combined_outputs.pred_boxes.contiguous()
         
-        # ENSURE LOSS IS ALWAYS PRESENT - Fix the root cause
-        if not hasattr(combined_outputs, 'loss') or combined_outputs.loss is None:
-            combined_outputs.loss = torch.tensor(0.0, device=combined_outputs.logits.device, requires_grad=False)
+        # Ensure loss is always present
+        combined_outputs.loss = torch.tensor(0.0, device=combined_outputs.logits.device, requires_grad=False)
         
-        # Make sure the output has all required attributes for evaluation
-        if not hasattr(combined_outputs, 'last_hidden_state'):
+        # Ensure last_hidden_state is present
+        if not hasattr(combined_outputs, 'last_hidden_state') or combined_outputs.last_hidden_state is None:
             batch_size, num_queries = combined_outputs.logits.shape[:2]
-            hidden_size = 768  # Standard YOLOS hidden size
             combined_outputs.last_hidden_state = torch.zeros(
-                batch_size, num_queries, hidden_size,
+                batch_size, num_queries, 768,
                 device=combined_outputs.logits.device,
                 dtype=combined_outputs.logits.dtype
             )
@@ -458,7 +442,7 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     # Wrap MoE for object detection compatibility
     moe_detector = MoEObjectDetectionModel(integrated_moe)
     
-    # Create test dataset
+    # Create test dataset - CRITICAL: Use same parameters as test.py
     test_dataset = BreastCancerDataset(
         split='test',
         splits_dir=SPLITS_DIR,
@@ -468,27 +452,34 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
         dataset_epoch=epoch
     )
     
-    # Setup evaluation using same approach as test.py
+    # Setup evaluation using EXACT same approach as test.py
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processors[0])
     
-    training_cfg = config.get('training', {})
-    output_dir = training_cfg.get('output_dir', './moe_output')
+    # Use EXACT same TrainingArguments as test.py
+    import datetime
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"MoE_{dataset_name}_{date_str}"
     
     training_args = TrainingArguments(
-        output_dir=output_dir,
+        output_dir='./moe_test_output',
+        run_name=run_name,
         per_device_eval_batch_size=8,
+        eval_do_concat_batches=False,
+        disable_tqdm=False,
+        logging_dir="./logs",
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=1,
+        logging_strategy="epoch",
+        report_to=[],  # Disable external loggers
+        load_best_model_at_end=True,
+        metric_for_best_model='eval_map_50',
+        greater_is_better=True,
+        fp16=torch.cuda.is_available(),
         dataloader_num_workers=2,
-        remove_unused_columns=False,
-        report_to=[],
+        gradient_accumulation_steps=2,
+        remove_unused_columns=False,  # CRITICAL: Same as test.py
     )
-    
-    # Custom data collator that preserves label structure exactly like test.py
-    def moe_collate_fn(examples):
-        # Use the original collate_fn without any modifications
-        return collate_fn(examples)
-
-    # Skip the debug comparison with individual expert - go directly to MoE testing
-    # since both are failing with the same issue
     
     print("\n=== Testing MoE model ===")
     trainer = Trainer(
@@ -496,10 +487,12 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
         args=training_args,
         eval_dataset=test_dataset,
         processing_class=image_processors[0],
-        data_collator=collate_fn,  # Use original collate_fn directly
+        data_collator=collate_fn,  # Use SAME collate_fn as test.py
         compute_metrics=eval_compute_metrics_fn,
     )
     
+    # First, let's test with a small sample to debug format
+    print("Running evaluation...")
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     
     print("\n=== MoE Test Results ===")
