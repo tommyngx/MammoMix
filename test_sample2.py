@@ -133,70 +133,18 @@ class ValidatedMoEObjectDetectionModel(torch.nn.Module):
         self.debug_count = 0
         
     def forward(self, pixel_values, labels=None):
-        # Get MoE output
+        # Get MoE output - this should now return the corrected YolosObjectDetectionOutput
         moe_output = self.moe_model(pixel_values)
-        
-        # Ensure output has proper structure for validation
-        from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
-        
-        # Handle logits
-        logits = moe_output.logits if hasattr(moe_output, 'logits') else moe_output['logits']
-        if logits.dim() == 2:
-            logits = logits.unsqueeze(0)
-        
-        # Handle pred_boxes
-        pred_boxes = moe_output.pred_boxes if hasattr(moe_output, 'pred_boxes') else moe_output['pred_boxes']
-        if pred_boxes.dim() == 2:
-            pred_boxes = pred_boxes.unsqueeze(0)
         
         self.debug_count += 1
         if self.debug_count <= 3 or self.debug_count % 10 == 0:
-            print(f"DEBUG Forward #{self.debug_count}: input shape {pixel_values.shape}, pred_boxes shape {pred_boxes.shape}")
+            print(f"DEBUG Forward #{self.debug_count}: input shape {pixel_values.shape}, moe_output type {type(moe_output)}")
+            if hasattr(moe_output, 'pred_boxes'):
+                print(f"DEBUG Forward #{self.debug_count}: pred_boxes shape {moe_output.pred_boxes.shape}")
         
-        # Create a completely new tensor to ensure it's properly formatted
-        # This avoids any potential memory layout or tensor view issues
-        batch_size, num_queries = pred_boxes.shape[:2]
-        
-        # Ensure pred_boxes has exactly 4 dimensions by creating a new tensor
-        if pred_boxes.shape[-1] != 4:
-            if self.debug_count <= 5:
-                print(f"DEBUG: Reshaping pred_boxes from {pred_boxes.shape}")
-            
-            # Create new tensor with exactly 4 dimensions
-            new_pred_boxes = torch.zeros(batch_size, num_queries, 4, 
-                                       device=pred_boxes.device, dtype=pred_boxes.dtype)
-            
-            # Copy available dimensions (take first 4 if more, pad with zeros if less)
-            copy_dims = min(4, pred_boxes.shape[-1])
-            new_pred_boxes[..., :copy_dims] = pred_boxes[..., :copy_dims]
-            pred_boxes = new_pred_boxes
-            
-            if self.debug_count <= 5:
-                print(f"DEBUG: Created new pred_boxes with shape: {pred_boxes.shape}")
-        else:
-            # Even if shape is correct, create a new contiguous tensor to avoid any issues
-            pred_boxes = pred_boxes.clone().contiguous()
-        
-        # Create loss and last_hidden_state to match expert model output exactly
-        loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=False)
-        hidden_size = 768
-        last_hidden_state = torch.zeros(batch_size, num_queries, hidden_size, 
-                                       device=logits.device, dtype=logits.dtype)
-        
-        # Create the output object
-        final_output = YolosObjectDetectionOutput(
-            loss=loss,
-            logits=logits.clone().contiguous(),  # Ensure contiguous
-            pred_boxes=pred_boxes,
-            last_hidden_state=last_hidden_state
-        )
-        
-        # Final validation
-        assert final_output.pred_boxes.shape[-1] == 4, f"Final pred_boxes must have 4 coordinates, got {final_output.pred_boxes.shape}"
-        assert final_output.pred_boxes.dim() == 3, f"Final pred_boxes must be 3D [batch, queries, 4], got {final_output.pred_boxes.shape}"
-        assert final_output.pred_boxes.is_contiguous(), "Final pred_boxes must be contiguous"
-        
-        return final_output
+        # Since train_moe.py now returns proper YolosObjectDetectionOutput, 
+        # we should be able to return it directly
+        return moe_output
 
 def test_model_output_format(model, test_dataset, device, model_name="Model"):
     """Test and debug model output format."""
@@ -549,28 +497,25 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
                         print(f"ISSUE FOUND: Raw MoE pred_boxes has {raw_moe_output.pred_boxes.shape[-1]} dimensions instead of 4")
                         print(f"Raw MoE pred_boxes sample values: {raw_moe_output.pred_boxes[0, 0, :8] if raw_moe_output.pred_boxes.shape[-1] > 8 else raw_moe_output.pred_boxes[0, 0, :]}")
                 
-                # Create validated wrapper
-                moe_detector = ValidatedMoEObjectDetectionModel(
-                    MoEObjectDetectionModel(integrated_moe), 
-                    image_processor
-                ).to(device)
+                # Create validated wrapper - now simplified since train_moe.py handles the formatting
+                moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
                 
                 # Test wrapped output
                 with torch.no_grad():
                     wrapped_moe_output = moe_detector(debug_batch['pixel_values'].to(device))
-                    print(f"Wrapped MoE output:")
+                    print(f"Direct MoE output:")
                     print(f"  Logits shape: {wrapped_moe_output.logits.shape}")
                     print(f"  Pred boxes shape: {wrapped_moe_output.pred_boxes.shape}")
                     print(f"  Pred boxes last dim: {wrapped_moe_output.pred_boxes.shape[-1]}")
-                    print(f"  Wrapped MoE pred_boxes[0,0,:]: {wrapped_moe_output.pred_boxes[0, 0, :]}")
+                    print(f"  Direct MoE pred_boxes[0,0,:]: {wrapped_moe_output.pred_boxes[0, 0, :]}")
                 
                 # Test post-processing
                 if not test_post_processing(moe_detector, test_dataset, image_processor, device):
                     print("Post-processing test failed, but continuing with evaluation...")
                 
-                # Evaluate MoE
+                # Evaluate MoE - use direct MoE model since train_moe.py now handles output formatting
                 moe_results = evaluate_model(moe_detector, test_dataset, image_processor, config, device, "MoE")
-                
+
             else:
                 print(f"Error: Need at least 2 expert models for MoE, found {len(models_list)}")
                 
