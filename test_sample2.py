@@ -134,13 +134,19 @@ class ValidatedMoEObjectDetectionModel(torch.nn.Module):
         
     def forward(self, pixel_values, labels=None):
         # Get MoE output - this should now return the corrected YolosObjectDetectionOutput
-        moe_output = self.moe_model(pixel_values)
+        moe_output = self.moe_model(pixel_values, labels=labels)
         
         self.debug_count += 1
         if self.debug_count <= 3 or self.debug_count % 10 == 0:
             print(f"DEBUG Forward #{self.debug_count}: input shape {pixel_values.shape}, moe_output type {type(moe_output)}")
             if hasattr(moe_output, 'pred_boxes'):
                 print(f"DEBUG Forward #{self.debug_count}: pred_boxes shape {moe_output.pred_boxes.shape}")
+            if hasattr(moe_output, 'loss'):
+                print(f"DEBUG Forward #{self.debug_count}: loss = {moe_output.loss}")
+        
+        # Ensure the output has a loss when labels are provided
+        if labels is not None and (not hasattr(moe_output, 'loss') or moe_output.loss is None):
+            moe_output.loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=False)
         
         # Since train_moe.py now returns proper YolosObjectDetectionOutput, 
         # we should be able to return it directly

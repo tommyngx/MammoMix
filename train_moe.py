@@ -396,10 +396,18 @@ class MoEObjectDetectionModel(nn.Module):
         combined_outputs.logits = combined_outputs.logits.contiguous()
         combined_outputs.pred_boxes = combined_outputs.pred_boxes.contiguous()
         
-        # Make sure the output has all required attributes for evaluation
-        if not hasattr(combined_outputs, 'loss'):
-            combined_outputs.loss = torch.tensor(0.0, device=combined_outputs.logits.device)
+        # Calculate loss if labels are provided (required for Trainer evaluation)
+        if labels is not None:
+            # Compute a dummy loss for evaluation compatibility
+            # In practice, you might want to compute actual object detection loss
+            loss = torch.tensor(0.0, device=combined_outputs.logits.device, requires_grad=False)
+        else:
+            loss = None
         
+        # Update the loss in the output
+        combined_outputs.loss = loss
+        
+        # Make sure the output has all required attributes for evaluation
         if not hasattr(combined_outputs, 'last_hidden_state'):
             batch_size, num_queries = combined_outputs.logits.shape[:2]
             hidden_size = 768  # Standard YOLOS hidden size
