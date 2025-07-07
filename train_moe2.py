@@ -117,14 +117,43 @@ class ImageRouterMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        # Initialize output tensors
-        batch_logits = torch.zeros(batch_size, 100, 2, device=pixel_values.device)  # Assuming 100 queries, 2 classes
-        batch_pred_boxes = torch.zeros(batch_size, 100, 4, device=pixel_values.device)  # Always 4 dimensions
+        # Get the first expert output to determine correct tensor shapes and dtypes
+        first_expert_idx = list(expert_groups.keys())[0]
+        first_sample_indices = expert_groups[first_expert_idx]
+        first_expert_pixel_values = pixel_values[first_sample_indices]
+        first_expert_labels = None
+        if labels is not None:
+            first_expert_labels = [labels[i] for i in first_sample_indices]
+        
+        with torch.no_grad():
+            reference_output = self.experts[first_expert_idx](first_expert_pixel_values, labels=first_expert_labels)
+        
+        # Initialize output tensors with correct dtypes and shapes from reference
+        num_queries = reference_output.logits.shape[1]
+        num_classes = reference_output.logits.shape[2]
+        batch_logits = torch.zeros(batch_size, num_queries, num_classes, 
+                                 device=pixel_values.device, dtype=reference_output.logits.dtype)
+        batch_pred_boxes = torch.zeros(batch_size, num_queries, 4, 
+                                     device=pixel_values.device, dtype=reference_output.pred_boxes.dtype)
         batch_loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=True)
         batch_last_hidden_state = None
         
-        # Process each expert group
-        for expert_idx, sample_indices in expert_groups.items():
+        # Use the reference output for the first group
+        batch_logits[first_sample_indices] = reference_output.logits
+        batch_pred_boxes[first_sample_indices] = reference_output.pred_boxes[..., :4]
+        
+        if hasattr(reference_output, 'loss') and reference_output.loss is not None:
+            batch_loss = batch_loss + reference_output.loss * len(first_sample_indices) / batch_size
+        
+        if hasattr(reference_output, 'last_hidden_state') and reference_output.last_hidden_state is not None:
+            batch_last_hidden_state = torch.zeros(batch_size, reference_output.last_hidden_state.shape[1], 
+                                                 reference_output.last_hidden_state.shape[2], 
+                                                 device=pixel_values.device, dtype=reference_output.last_hidden_state.dtype)
+            batch_last_hidden_state[first_sample_indices] = reference_output.last_hidden_state
+        
+        # Process remaining expert groups (skip the first one we already processed)
+        remaining_groups = {k: v for k, v in expert_groups.items() if k != first_expert_idx}
+        for expert_idx, sample_indices in remaining_groups.items():
             # Get inputs for this expert
             expert_pixel_values = pixel_values[sample_indices]
             
@@ -144,9 +173,6 @@ class ImageRouterMoE(nn.Module):
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 batch_loss = batch_loss + expert_output.loss * len(sample_indices) / batch_size
             
-            if batch_last_hidden_state is None and hasattr(expert_output, 'last_hidden_state'):
-                batch_last_hidden_state = torch.zeros(batch_size, expert_output.last_hidden_state.shape[1], 
-                                                     expert_output.last_hidden_state.shape[2], device=pixel_values.device)
             if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
                 batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
         
