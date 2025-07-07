@@ -200,13 +200,19 @@ class ImageRouterMoE(nn.Module):
         if labels is not None and routing_loss.item() > 0:
             batch_loss = batch_loss + 0.1 * routing_loss
         
+        # Final safety check - ensure ALL outputs have exactly 4 dimensions
+        assert batch_pred_boxes.shape[-1] == 4, f"FINAL CHECK FAILED: pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
+        
+        # Additional safety: force contiguous and ensure exact 4D for all outputs
+        batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
+        
         # Create output exactly like a single YOLOS model
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
         
         combined_output = YolosObjectDetectionOutput(
             loss=batch_loss,
             logits=batch_logits,
-            pred_boxes=batch_pred_boxes,
+            pred_boxes=batch_pred_boxes,  # Now guaranteed to be exactly 4D
             last_hidden_state=batch_last_hidden_state
         )
         
