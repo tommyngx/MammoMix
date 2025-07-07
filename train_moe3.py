@@ -34,6 +34,7 @@ from transformers import (
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn, run_model_inference_with_map
+import pandas as pd
 
 def load_config(config_path):
     """Load configuration from YAML file."""
@@ -267,8 +268,162 @@ def load_expert_models(weight_dir, device):
     
     return models, processors
 
+def save_simple_moe_model(moe_model, image_processor, save_dir):
+    """Save SimpleMoE model in standard HuggingFace format."""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Save model weights
+    model_path = os.path.join(save_dir, 'model.safetensors')
+    from safetensors.torch import save_file
+    save_file(moe_model.state_dict(), model_path)
+    
+    # Save preprocessor config
+    image_processor.save_pretrained(save_dir)
+    
+    # Create and save model config
+    config = {
+        "model_type": "simple_moe",
+        "num_experts": len(moe_model.experts),
+        "expert_names": moe_model.expert_names,
+        "hidden_size": 768,
+        "num_labels": 2,
+        "id2label": {"0": "cancer"},
+        "label2id": {"cancer": 0},
+        "problem_type": "single_label_classification",
+        "torch_dtype": "float32",
+        "transformers_version": "4.36.0"
+    }
+    
+    import json
+    config_path = os.path.join(save_dir, 'config.json')
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    print(f"SimpleMoE model saved to: {save_dir}")
+    print(f"  - model.safetensors")
+    print(f"  - config.json") 
+    print(f"  - preprocessor_config.json")
+
+def get_all_metrics(model, test_dataset, image_processor, device, model_name):
+    """Get all metrics (mAP + basic) for any model consistently."""
+    # Get mAP metrics using custom function
+    map_metrics = run_model_inference_with_map(model, test_dataset, image_processor, device)
+    
+    # Get basic metrics (loss, runtime, etc.) using Trainer
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"{model_name}_{date_str}"
+    
+    training_args = TrainingArguments(
+        output_dir='./temp_eval',
+        run_name=run_name,
+        per_device_eval_batch_size=8,
+        eval_strategy="no",
+        save_strategy="no",
+        disable_tqdm=False,
+        logging_dir="./logs",
+        report_to=[],
+        fp16=torch.cuda.is_available(),
+        dataloader_num_workers=0,
+        remove_unused_columns=False,
+    )
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=None,
+    )
+    
+    basic_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    
+    # Combine all metrics
+    all_metrics = basic_results.copy()
+    for key, value in map_metrics.items():
+        all_metrics[f'test_{key}'] = value
+    
+    return all_metrics
+
+def print_metrics_comparison(individual_metrics, moe_metrics, dataset_name):
+    """Print metrics comparison in a clean DataFrame format."""
+    # Define the standard metric order for consistent output
+    metric_order = [
+        'test_loss',
+        'test_model_preparation_time', 
+        'test_runtime',
+        'test_samples_per_second',
+        'test_steps_per_second',
+        'test_map',
+        'test_map_50',
+        'test_map_75',
+        'test_map_small',
+        'test_map_medium',
+        'test_map_large'
+    ]
+    
+    # Prepare data for DataFrame
+    comparison_data = []
+    
+    for metric in metric_order:
+        if metric in individual_metrics or metric in moe_metrics:
+            individual_value = individual_metrics.get(metric, 0.0)
+            moe_value = moe_metrics.get(metric, 0.0)
+            
+            # Calculate difference and percentage
+            if isinstance(individual_value, (int, float)) and isinstance(moe_value, (int, float)):
+                diff = moe_value - individual_value
+                if individual_value != 0:
+                    pct_change = (diff / individual_value) * 100
+                else:
+                    pct_change = 0.0
+                
+                comparison_data.append({
+                    'Metric': metric,
+                    f'Individual_{dataset_name}': f"{individual_value:.4f}",
+                    f'SimpleMoE': f"{moe_value:.4f}",
+                    'Difference': f"{diff:.4f}",
+                    'Change_%': f"{pct_change:.2f}%"
+                })
+            else:
+                comparison_data.append({
+                    'Metric': metric,
+                    f'Individual_{dataset_name}': str(individual_value),
+                    f'SimpleMoE': str(moe_value),
+                    'Difference': 'N/A',
+                    'Change_%': 'N/A'
+                })
+    
+    # Create and display DataFrame
+    df = pd.DataFrame(comparison_data)
+    
+    print(f"\n" + "="*80)
+    print(f"METRICS COMPARISON: Individual {dataset_name} Expert vs SimpleMoE")
+    print("="*80)
+    print(df.to_string(index=False))
+    print("="*80)
+    
+    # Summary analysis
+    if 'test_map_50' in individual_metrics and 'test_map_50' in moe_metrics:
+        individual_map50 = individual_metrics['test_map_50']
+        moe_map50 = moe_metrics['test_map_50']
+        
+        if isinstance(individual_map50, (int, float)) and isinstance(moe_map50, (int, float)):
+            if individual_map50 > 0:
+                performance_ratio = (moe_map50 / individual_map50) * 100
+                print(f"\n📊 Performance Summary:")
+                print(f"   SimpleMoE achieves {performance_ratio:.1f}% of individual expert mAP@50")
+                
+                if performance_ratio >= 95:
+                    print(f"   Status: ✅ Excellent performance retention")
+                elif performance_ratio >= 85:
+                    print(f"   Status: ✅ Good performance retention")
+                else:
+                    print(f"   Status: ⚠️ Performance degradation detected")
+    
+    return df
+
 def evaluate_simple_moe(config, device, dataset_name, expert_weights_dir):
-    """Evaluate SimpleMoE with comprehensive mAP calculation and comparison."""
+    """Evaluate SimpleMoE with comprehensive metrics comparison."""
     # Load expert models and image processor
     expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     image_processor = expert_processors[0]
@@ -308,171 +463,58 @@ def evaluate_simple_moe(config, device, dataset_name, expert_weights_dir):
     
     print(f"Evaluating SimpleMoE on {dataset_name} ({len(test_dataset)} samples)...")
     
-    # Evaluate individual expert for reference
-    print(f"\n=== Evaluating Individual {dataset_name} Expert ===")
+    # Get individual expert for comparison
     dataset_map = {'CSAW': 0, 'DMID': 1, 'DDSM': 2}
     expert_idx = dataset_map[dataset_name]
     individual_expert = expert_models[expert_idx]
     
-    individual_map_metrics = run_model_inference_with_map(
-        individual_expert, test_dataset, image_processor, device
+    # Get all metrics for both models using consistent function
+    print(f"\n=== Evaluating Individual {dataset_name} Expert ===")
+    individual_metrics = get_all_metrics(
+        individual_expert, test_dataset, image_processor, device, f"Individual_{dataset_name}"
     )
     
-    print(f"Individual {dataset_name} Expert Results:")
-    for key, value in individual_map_metrics.items():
-        print(f"  individual_{key}: {value:.4f}")
-    
-    # Evaluate SimpleMoE
     print(f"\n=== Evaluating SimpleMoE ===")
-    moe_map_metrics = run_model_inference_with_map(
-        moe_model, test_dataset, image_processor, device
+    moe_metrics = get_all_metrics(
+        moe_model, test_dataset, image_processor, device, "SimpleMoE"
     )
     
-    # Get basic metrics (loss, runtime, etc.) using Trainer
-    training_cfg = config.get('training', {})
-    per_device_eval_batch_size = training_cfg.get('batch_size', 8)
+    # Print comprehensive comparison using DataFrame
+    comparison_df = print_metrics_comparison(individual_metrics, moe_metrics, dataset_name)
     
-    date_str = datetime.datetime.now().strftime("%d%m%y")
-    run_name = f"SimpleMoE_{dataset_name}_{date_str}"
-    
-    training_args = TrainingArguments(
-        output_dir='./temp_eval',
-        run_name=run_name,
-        per_device_eval_batch_size=per_device_eval_batch_size,
-        eval_strategy="no",
-        save_strategy="no",
-        disable_tqdm=False,
-        logging_dir="./logs",
-        report_to=[],
-        fp16=torch.cuda.is_available(),
-        dataloader_num_workers=0,
-        remove_unused_columns=False,
-    )
-    
-    trainer = Trainer(
-        model=moe_model,
-        args=training_args,
-        processing_class=image_processor,
-        data_collator=collate_fn,
-        compute_metrics=None,
-    )
-    
-    basic_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-    
-    # Combine results
-    test_results = basic_results.copy()
-    for key, value in moe_map_metrics.items():
-        test_results[f'test_{key}'] = value
-    
-    # Display results
-    print("\n=== SimpleMoE Complete Results ===")
-    for key, value in test_results.items():
-        if isinstance(value, float):
-            print(f"{key}: {value:.4f}")
-        else:
-            print(f"{key}: {value}")
-    
-    # Analyze routing performance
+    # Get routing statistics
     final_stats = moe_model.get_routing_stats()
     target_usage = final_stats.get(dataset_name, 0.0)
     
-    print(f"\n=== Routing Analysis ===")
+    print(f"\n🔄 Routing Analysis:")
     total_routed = moe_model.total_routed
-    print(f"Total samples routed: {total_routed}")
-    
+    print(f"   Total samples routed: {total_routed}")
     for expert_name, usage in final_stats.items():
         count = int(usage * total_routed) if total_routed > 0 else 0
-        print(f"{expert_name}: {usage*100:.1f}% ({count} samples)")
+        print(f"   {expert_name}: {usage*100:.1f}% ({count} samples)")
     
-    print(f"\nRouting to correct expert ({dataset_name}): {target_usage*100:.1f}%")
+    print(f"\n   Routing to correct expert ({dataset_name}): {target_usage*100:.1f}%")
     
     if target_usage > 0.95:
-        routing_status = "✅ Excellent routing (>95%)"
+        print(f"   Routing quality: ✅ Excellent (>95%)")
     elif target_usage > 0.80:
-        routing_status = "✅ Good routing (>80%)"
+        print(f"   Routing quality: ✅ Good (>80%)")
     else:
-        routing_status = "⚠️ Poor routing (<80%)"
+        print(f"   Routing quality: ⚠️ Poor (<80%)")
     
-    print(routing_status)
+    # Save SimpleMoE model in standard format
+    model_save_dir = os.path.join(expert_weights_dir, f'simple_moe_{dataset_name}')
+    save_simple_moe_model(moe_model, image_processor, model_save_dir)
     
-    # Performance comparison summary
-    print(f"\n" + "="*60)
-    print(f"PERFORMANCE SUMMARY: {dataset_name}")
-    print("="*60)
-    
-    print(f"\n🔸 Individual {dataset_name} Expert:")
-    for key, value in individual_map_metrics.items():
-        print(f"  {key}: {value:.4f}")
-    
-    print(f"\n🔸 SimpleMoE:")
-    for key, value in moe_map_metrics.items():
-        print(f"  {key}: {value:.4f}")
-    print(f"  routing_accuracy: {target_usage*100:.1f}%")
-    
-    # mAP comparison analysis
-    individual_map50 = individual_map_metrics.get('map_50', 0)
-    moe_map50 = moe_map_metrics.get('map_50', 0)
-    
-    if individual_map50 > 0 and moe_map50 > 0:
-        map_diff = abs(individual_map50 - moe_map50)
-        map_ratio = moe_map50 / individual_map50 * 100
-        
-        print(f"\n🔸 Performance Analysis:")
-        print(f"  Individual mAP@50: {individual_map50:.4f}")
-        print(f"  SimpleMoE mAP@50: {moe_map50:.4f}")
-        print(f"  Absolute difference: {map_diff:.4f}")
-        print(f"  Relative performance: {map_ratio:.1f}%")
-        
-        if map_diff < 0.01:
-            performance_status = "✅ Identical performance"
-        elif map_ratio > 95:
-            performance_status = "✅ Very close performance"
-        elif map_ratio > 85:
-            performance_status = "✅ Good performance"
-        else:
-            performance_status = "⚠️ Performance degradation"
-        
-        print(f"  Status: {performance_status}")
-    
-    print("="*60)
-    
-    # Save comprehensive results
-    results_path = os.path.join(moe_save_dir, f'evaluation_results_{dataset_name}.json')
-    comprehensive_results = {
-        'dataset': dataset_name,
-        'evaluation_timestamp': datetime.datetime.now().isoformat(),
-        'individual_expert_metrics': individual_map_metrics,
-        'simple_moe_metrics': {
-            'basic_metrics': basic_results,
-            'map_metrics': moe_map_metrics
-        },
-        'routing_analysis': {
-            'routing_stats': final_stats,
-            'routing_accuracy': target_usage,
-            'total_samples': total_routed
-        },
-        'performance_comparison': {
-            'map_50_individual': individual_map50,
-            'map_50_moe': moe_map50,
-            'map_50_difference': abs(individual_map50 - moe_map50) if individual_map50 > 0 and moe_map50 > 0 else None,
-            'relative_performance_pct': (moe_map50 / individual_map50 * 100) if individual_map50 > 0 and moe_map50 > 0 else None
-        }
-    }
-    
-    with open(results_path, 'w') as f:
-        json.dump(comprehensive_results, f, indent=2)
-    
-    print(f"\nDetailed results saved to: {results_path}")
-    
-    return test_results, final_stats
+    return moe_metrics, final_stats, moe_model
 
 def test_only_mode(config, device, dataset_name, expert_weights_dir):
-    """Test-only mode for SimpleMoE."""
+    """Professional test-only mode that saves model in standard format."""
     print(f"SimpleMoE Evaluation on {dataset_name}")
     print("="*50)
     
     try:
-        results, routing_stats = evaluate_simple_moe(config, device, dataset_name, expert_weights_dir)
+        results, routing_stats, moe_model = evaluate_simple_moe(config, device, dataset_name, expert_weights_dir)
         return results
     except Exception as e:
         print(f"Evaluation failed: {e}")
@@ -494,13 +536,18 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None, tes
     if dataset:
         print(f"Target dataset: {dataset}")
     
-    # Test-only mode
+    # Test-only mode with professional model saving
     if test:
         target_dataset = dataset if dataset else 'CSAW'
         print(f"Running test-only mode on dataset: {target_dataset}")
+        print("Model will be automatically saved in HuggingFace format")
+        
         results = test_only_mode(config, device, target_dataset, expert_weights_dir)
+        
         print("\n" + "="*60)
         print("TEST-ONLY MODE COMPLETED!")
+        print("✅ SimpleMoE model saved in standard format")
+        print("✅ Ready for deployment or further evaluation")
         print("="*60)
         return results
 
