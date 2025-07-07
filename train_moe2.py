@@ -561,7 +561,7 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None):
     
     # SAVE MODEL BEFORE TRAINING STARTS to avoid losing progress
     date_str = datetime.datetime.now().strftime("%d%m%y")
-    save_path = f'../router_moe_{DATASET_NAME}_{date_str}'
+    save_path = f'../moe_{DATASET_NAME}_{date_str}'
     print(f"Model will be saved to: {save_path}")
     
     try:
