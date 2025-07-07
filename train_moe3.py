@@ -576,7 +576,7 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, 
         return None
 
 def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
-    """Main function - much simpler approach."""
+    """Main function - automatically runs both phases if not specified."""
     config = load_config(config_path)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -591,21 +591,37 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
     if dataset:
         print(f"Target dataset: {dataset}")
     
-    if phase == "1" or phase is None:
-        # Train simple dataset classifier
+    # If no phase specified, run both phases automatically
+    if phase is None:
+        print("No phase specified - running both Phase 1 (training) and Phase 2 (testing)")
+        run_phase_1 = True
+        run_phase_2 = True
+    elif phase == "1":
+        run_phase_1 = True
+        run_phase_2 = False
+    elif phase == "2":
+        run_phase_1 = False
+        run_phase_2 = True
+    
+    # Phase 1: Train dataset classifier
+    if run_phase_1:
+        print("\n" + "="*60)
+        print("STARTING PHASE 1: TRAINING DATASET CLASSIFIER")
+        print("="*60)
         classifier = train_dataset_classifier(config, device, epoch, expert_weights_dir)
+        print("Phase 1 completed successfully!")
         
-        if phase == "1":
-            print("Phase 1 completed.")
+        if not run_phase_2:
+            print("\nTraining completed. Use --phase 2 to test the model.")
             return
     
-    if phase == "2" or phase is None:
-        # Final test with best classifier on specific dataset
-        print("\n" + "="*50)
-        print("FINAL TEST WITH BEST CLASSIFIER")
-        print("="*50)
+    # Phase 2: Test with best classifier
+    if run_phase_2:
+        print("\n" + "="*60)
+        print("STARTING PHASE 2: TESTING WITH BEST CLASSIFIER")
+        print("="*60)
         
-        # Load classifier from new organized path
+        # Load classifier from organized path
         moe_save_dir = os.path.join(expert_weights_dir, 'moe_combined')
         classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
         
@@ -615,6 +631,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
         classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
         classifier.load_state_dict(torch.load(classifier_path, map_location=device))
         classifier.eval()
+        print(f"Loaded best classifier from: {classifier_path}")
         
         # Test on specified dataset and save final results
         results = test_moe_with_classifier(config, classifier, device, "FINAL", expert_weights_dir, dataset)
@@ -640,7 +657,20 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
                 json.dump(json_results, f, indent=2)
             
             print(f"Final MoE model saved to {moe_save_dir}")
+        
+        print("Phase 2 completed successfully!")
     
-    print("\n" + "="*50)
-    print("TRAINING COMPLETE!")
-    print("="*50)
+    print("\n" + "="*60)
+    print("ALL PHASES COMPLETED SUCCESSFULLY!")
+    print("="*60)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Number of epochs')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name for testing (CSAW/DMID/DDSM)')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Expert weights directory')
+    parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase (1: train only, 2: test only, None: both)')
+    args = parser.parse_args()
+
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase)
