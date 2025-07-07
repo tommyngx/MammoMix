@@ -480,19 +480,13 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
     
     training_args = TrainingArguments(
         output_dir=output_dir,
-        per_device_eval_batch_size=8,
-        dataloader_num_workers=2,
+        per_device_eval_batch_size=1,  # Use batch size 1 to avoid concatenation issues
+        dataloader_num_workers=0,  # Set to 0 to avoid multiprocessing issues
         remove_unused_columns=False,
         report_to=[],
+        fp16=torch.cuda.is_available(),
+        eval_do_concat_batches=False,
     )
-    
-    # Custom data collator that preserves label structure exactly like test.py
-    def moe_collate_fn(examples):
-        # Use the original collate_fn without any modifications
-        return collate_fn(examples)
-
-    # Skip the debug comparison with individual expert - go directly to MoE testing
-    # since both are failing with the same issue
     
     print("\n=== Testing MoE model ===")
     trainer = Trainer(
@@ -500,7 +494,7 @@ def test_moe_model(config_path, model_path, dataset_name, weight_dir, epoch=None
         args=training_args,
         eval_dataset=test_dataset,
         processing_class=image_processors[0],
-        data_collator=collate_fn,  # Use original collate_fn directly
+        data_collator=collate_fn,
         compute_metrics=eval_compute_metrics_fn,
     )
     
