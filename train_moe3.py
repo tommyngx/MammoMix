@@ -274,7 +274,7 @@ def load_expert_models(weight_dir, device):
     return models, processors
 
 def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
-    """Simple evaluation of SimpleMoE - bypasses evaluation.py bug and shows routing stats."""
+    """Complete evaluation of SimpleMoE using evaluation.py like test.py."""
     # Load components silently
     expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     image_processor = expert_processors[0]
@@ -312,85 +312,112 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     
     print(f"Evaluating SimpleMoE on {dataset_name} ({len(test_dataset)} samples)...")
     
-    # Simple evaluation without using the buggy evaluation.py
-    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, collate_fn=collate_fn)
-    
-    total_loss = 0.0
-    num_batches = 0
-    
-    # Helper function to move labels to device
-    def move_labels_to_device(labels_list, target_device):
-        if labels_list is None:
-            return None
-        moved_labels = []
-        for label_dict in labels_list:
-            moved_dict = {}
-            for key, value in label_dict.items():
-                if isinstance(value, torch.Tensor):
-                    moved_dict[key] = value.to(target_device)
-                else:
-                    moved_dict[key] = value
-            moved_labels.append(moved_dict)
-        return moved_labels
-    
-    with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Evaluating"):
-            pixel_values = batch['pixel_values'].to(device)
-            labels = batch['labels']
-            labels = move_labels_to_device(labels, device)
-            
-            output = moe_model(pixel_values, labels=labels)
-            
-            if hasattr(output, 'loss') and output.loss is not None:
-                total_loss += output.loss.item()
-                num_batches += 1
-    
-    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-    
-    # Get routing statistics
-    final_stats = moe_model.get_routing_stats()
-    
-    # Create results in the expected format
-    results = {
-        'test_loss': avg_loss,
-        'test_samples': len(test_dataset)
-    }
-    
-    # Try to get mAP evaluation if possible (bypass the bug)
+    # Try full evaluation with mAP like test.py first
+    results = {}
     try:
-        # Use a simple trainer without compute_metrics to avoid the bug
+        # Setup training args exactly like test.py
+        import datetime
+        date_str = datetime.datetime.now().strftime("%d%m%y")
+        run_name = f"SimpleMoE_{dataset_name}_{date_str}"
+        
         training_args = TrainingArguments(
             output_dir='./temp_eval',
+            run_name=run_name,
             per_device_eval_batch_size=8,
-            dataloader_num_workers=0,
-            remove_unused_columns=False,
-            report_to=[],
-            fp16=torch.cuda.is_available(),
+            learning_rate=5e-5,
+            weight_decay=1e-4,
+            warmup_ratio=0.05,
+            lr_scheduler_type='cosine_with_restarts',
+            lr_scheduler_kwargs=dict(num_cycles=1),
             eval_do_concat_batches=False,
-            disable_tqdm=True,
+            disable_tqdm=False,
+            logging_dir="./logs",
+            eval_strategy="epoch",
+            save_strategy="epoch",
+            save_total_limit=1,
+            logging_strategy="epoch",
+            report_to=[],  # Disable wandb and all external loggers
+            load_best_model_at_end=True,
+            metric_for_best_model='eval_map_50',
+            greater_is_better=True,
+            fp16=torch.cuda.is_available(),
+            dataloader_num_workers=0,
+            gradient_accumulation_steps=2,
+            remove_unused_columns=False,
         )
         
-        # Try evaluation without compute_metrics first
+        # Use evaluation function from evaluation.py exactly like test.py
+        eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+        
         trainer = Trainer(
             model=moe_model,
             args=training_args,
             processing_class=image_processor,
             data_collator=collate_fn,
-            compute_metrics=None,  # Disable compute_metrics to avoid bug
+            compute_metrics=eval_compute_metrics_fn,  # This should give us mAP
         )
         
-        print("Running basic evaluation...")
-        basic_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-        results.update(basic_results)
+        print("Running full mAP evaluation (like test.py)...")
+        results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+        
+        # Print complete results like test.py
+        print(f"\n=== SimpleMoE Results on {dataset_name} ===")
+        for key, value in results.items():
+            if isinstance(value, float):
+                print(f"{key}: {value:.4f}")
+            else:
+                print(f"{key}: {value}")
         
     except Exception as e:
-        print(f"Basic evaluation failed: {e}")
-        print("Using loss-only evaluation")
+        print(f"Full mAP evaluation failed: {e}")
+        print("Falling back to basic evaluation...")
+        
+        # Fallback: Simple evaluation without compute_metrics
+        test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, collate_fn=collate_fn)
+        
+        total_loss = 0.0
+        num_batches = 0
+        
+        # Helper function to move labels to device
+        def move_labels_to_device(labels_list, target_device):
+            if labels_list is None:
+                return None
+            moved_labels = []
+            for label_dict in labels_list:
+                moved_dict = {}
+                for key, value in label_dict.items():
+                    if isinstance(value, torch.Tensor):
+                        moved_dict[key] = value.to(target_device)
+                    else:
+                        moved_dict[key] = value
+                moved_labels.append(moved_dict)
+            return moved_labels
+        
+        with torch.no_grad():
+            for batch in tqdm(test_loader, desc="Evaluating"):
+                pixel_values = batch['pixel_values'].to(device)
+                labels = batch['labels']
+                labels = move_labels_to_device(labels, device)
+                
+                output = moe_model(pixel_values, labels=labels)
+                
+                if hasattr(output, 'loss') and output.loss is not None:
+                    total_loss += output.loss.item()
+                    num_batches += 1
+        
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        
+        results = {
+            'test_loss': avg_loss,
+            'test_samples': len(test_dataset)
+        }
+        
+        print(f"\n=== SimpleMoE Results on {dataset_name} (Basic) ===")
+        print(f"Loss: {avg_loss:.4f}")
+        print(f"Samples: {len(test_dataset)}")
     
-    # Print clean results
-    print(f"\n=== SimpleMoE Results on {dataset_name} ===")
-    print(f"Loss: {avg_loss:.4f}")
-    print(f"Samples: {len(test_dataset)}")
+    # Get routing statistics
+    final_stats = moe_model.get_routing_stats()
     
     # Print routing statistics with better formatting
     print(f"\n=== Routing Statistics ===")
@@ -415,7 +442,6 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
         print("✗ Poor routing (<60%)")
     
     # Save results
-    moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
     test_results_path = os.path.join(moe_save_dir, f'moe_results_{dataset_name}.json')
     with open(test_results_path, 'w') as f:
         json_results = {}
