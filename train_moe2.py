@@ -446,7 +446,11 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     
     # Load training arguments from config (exactly like train.py)
     training_cfg = config.get('training', {})
-    output_dir = training_cfg.get('output_dir', '/tmp')
+    
+    # SAVE TO WEIGHT_DIR: Use expert_weights_dir as base output directory
+    output_dir = os.path.join(expert_weights_dir, f'router_moe_{DATASET_NAME}')
+    os.makedirs(output_dir, exist_ok=True)
+    
     num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
     per_device_train_batch_size = training_cfg.get('batch_size', 8)
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
@@ -475,7 +479,7 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     
     # ULTRA SIMPLE training arguments for very fast convergence
     training_args = TrainingArguments(
-        output_dir=output_dir,
+        output_dir=output_dir,  # Save to weight_dir
         run_name=run_name,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
@@ -490,10 +494,10 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         logging_dir=wandb_dir if wandb_dir else "./logs",
         eval_strategy="epoch",
         save_strategy="epoch",
-        save_total_limit=save_total_limit,
+        save_total_limit=1,   # ONLY keep best model
         logging_strategy="epoch",  # Log only at epoch level
-        report_to="all",
-        load_best_model_at_end=True,
+        report_to=[],  # Disable external logging to reduce noise
+        load_best_model_at_end=True,  # Automatically load best model
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
         fp16=torch.cuda.is_available(),
@@ -515,22 +519,18 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         processing_class=image_processor,
         data_collator=collate_fn,
         compute_metrics=eval_compute_metrics_fn,
-        # callbacks=[EarlyStoppingCallback(early_stopping_patience=10)]
     )
     
-    print("\n=== Training now ===")
-    
-    # SAVE MODEL BEFORE TRAINING STARTS to avoid losing progress
-    date_str = datetime.datetime.now().strftime("%d%m%y")
-    save_path = f'../moe_{DATASET_NAME}_{date_str}'
-    print(f"Model will be saved to: {save_path}")
+    print(f"\n=== Training Router MoE ===")
+    print(f"Best model will be automatically saved to: {output_dir}")
     
     try:
         trainer.train()
         
-        # Save model after successful training (same as train.py)
-        trainer.save_model(save_path)
-        print(f"Model saved to: {save_path}")
+        # NO MANUAL SAVE - Trainer automatically saves best model due to:
+        # - save_strategy="epoch"
+        # - save_total_limit=1 (only keep best)
+        # - load_best_model_at_end=True
         
         # Evaluate on test dataset (same as train.py structure)
         print("\n=== Evaluating on test dataset ===")
@@ -555,9 +555,7 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     
     except Exception as e:
         print(f"Training/Evaluation failed: {e}")
-        # Still save the model if training completed but evaluation failed
-        trainer.save_model(save_path)
-        print(f"Model saved to: {save_path} (despite evaluation error)")
+        # Best model is already saved automatically by Trainer
         raise e
 
 if __name__ == "__main__":
