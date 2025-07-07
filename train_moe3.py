@@ -274,7 +274,7 @@ def load_expert_models(weight_dir, device):
     return models, processors
 
 def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
-    """Complete evaluation of SimpleMoE using evaluation.py like test.py."""
+    """Complete evaluation of SimpleMoE using trainer.evaluate exactly like test.py."""
     # Load components silently
     expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     image_processor = expert_processors[0]
@@ -293,7 +293,7 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     classifier.load_state_dict(torch.load(classifier_path, map_location=device))
     classifier.eval()
     
-    # Create test dataset
+    # Create test dataset exactly like test.py
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
     
@@ -312,114 +312,81 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     
     print(f"Evaluating SimpleMoE on {dataset_name} ({len(test_dataset)} samples)...")
     
-    # Try full evaluation with mAP like test.py first
-    results = {}
-    try:
-        # Setup training args exactly like test.py
-        import datetime
-        date_str = datetime.datetime.now().strftime("%d%m%y")
-        run_name = f"SimpleMoE_{dataset_name}_{date_str}"
-        
-        training_args = TrainingArguments(
-            output_dir='./temp_eval',
-            run_name=run_name,
-            per_device_eval_batch_size=8,
-            learning_rate=5e-5,
-            weight_decay=1e-4,
-            warmup_ratio=0.05,
-            lr_scheduler_type='cosine_with_restarts',
-            lr_scheduler_kwargs=dict(num_cycles=1),
-            eval_do_concat_batches=False,
-            disable_tqdm=False,
-            logging_dir="./logs",
-            eval_strategy="epoch",
-            save_strategy="epoch",
-            save_total_limit=1,
-            logging_strategy="epoch",
-            report_to=[],  # Disable wandb and all external loggers
-            load_best_model_at_end=True,
-            metric_for_best_model='eval_map_50',
-            greater_is_better=True,
-            fp16=torch.cuda.is_available(),
-            dataloader_num_workers=0,
-            gradient_accumulation_steps=2,
-            remove_unused_columns=False,
-        )
-        
-        # Use evaluation function from evaluation.py exactly like test.py
-        eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
-        
-        trainer = Trainer(
-            model=moe_model,
-            args=training_args,
-            processing_class=image_processor,
-            data_collator=collate_fn,
-            compute_metrics=eval_compute_metrics_fn,  # This should give us mAP
-        )
-        
-        print("Running full mAP evaluation (like test.py)...")
-        results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-        
-        # Print complete results like test.py
-        print(f"\n=== SimpleMoE Results on {dataset_name} ===")
-        for key, value in results.items():
-            if isinstance(value, float):
-                print(f"{key}: {value:.4f}")
-            else:
-                print(f"{key}: {value}")
-        
-    except Exception as e:
-        print(f"Full mAP evaluation failed: {e}")
-        print("Falling back to basic evaluation...")
-        
-        # Fallback: Simple evaluation without compute_metrics
-        test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, collate_fn=collate_fn)
-        
-        total_loss = 0.0
-        num_batches = 0
-        
-        # Helper function to move labels to device
-        def move_labels_to_device(labels_list, target_device):
-            if labels_list is None:
-                return None
-            moved_labels = []
-            for label_dict in labels_list:
-                moved_dict = {}
-                for key, value in label_dict.items():
-                    if isinstance(value, torch.Tensor):
-                        moved_dict[key] = value.to(target_device)
-                    else:
-                        moved_dict[key] = value
-                moved_labels.append(moved_dict)
-            return moved_labels
-        
-        with torch.no_grad():
-            for batch in tqdm(test_loader, desc="Evaluating"):
-                pixel_values = batch['pixel_values'].to(device)
-                labels = batch['labels']
-                labels = move_labels_to_device(labels, device)
-                
-                output = moe_model(pixel_values, labels=labels)
-                
-                if hasattr(output, 'loss') and output.loss is not None:
-                    total_loss += output.loss.item()
-                    num_batches += 1
-        
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        
-        results = {
-            'test_loss': avg_loss,
-            'test_samples': len(test_dataset)
-        }
-        
-        print(f"\n=== SimpleMoE Results on {dataset_name} (Basic) ===")
-        print(f"Loss: {avg_loss:.4f}")
-        print(f"Samples: {len(test_dataset)}")
+    # Setup training args exactly like test.py
+    training_cfg = config.get('training', {})
+    
+    # Extract all training arguments from config like test.py
+    per_device_eval_batch_size = training_cfg.get('batch_size', 8)
+    learning_rate = training_cfg.get('learning_rate', 5e-5)
+    weight_decay = training_cfg.get('weight_decay', 1e-4)
+    warmup_ratio = training_cfg.get('warmup_ratio', 0.05)
+    lr_scheduler_type = training_cfg.get('lr_scheduler_type', 'cosine_with_restarts')
+    lr_scheduler_kwargs = training_cfg.get('lr_scheduler_kwargs', dict(num_cycles=1))
+    eval_do_concat_batches = training_cfg.get('eval_do_concat_batches', False)
+    dataloader_num_workers = training_cfg.get('num_workers', 2)
+    gradient_accumulation_steps = training_cfg.get('gradient_accumulation_steps', 2)
+    remove_unused_columns = training_cfg.get('remove_unused_columns', False)
+    
+    # Create run_name exactly like test.py
+    import datetime
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"SimpleMoE_{dataset_name}_{date_str}"
+    
+    # Use exact TrainingArguments from test.py
+    training_args = TrainingArguments(
+        output_dir='./temp_eval',
+        run_name=run_name,
+        per_device_eval_batch_size=per_device_eval_batch_size,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        warmup_ratio=warmup_ratio,
+        lr_scheduler_type=lr_scheduler_type,
+        lr_scheduler_kwargs=lr_scheduler_kwargs,
+        eval_do_concat_batches=eval_do_concat_batches,
+        disable_tqdm=False,
+        logging_dir="./logs",
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=1,
+        logging_strategy="epoch",
+        report_to=[],  # Disable wandb and all external loggers
+        load_best_model_at_end=True,
+        metric_for_best_model='eval_map_50',
+        greater_is_better=True,
+        fp16=torch.cuda.is_available(),
+        dataloader_num_workers=dataloader_num_workers,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        remove_unused_columns=remove_unused_columns,
+    )
+    
+    # Use evaluation function from evaluation.py exactly like test.py
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    # Create trainer exactly like test.py
+    trainer = Trainer(
+        model=moe_model,
+        args=training_args,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    # Run evaluation exactly like test.py
+    print(f'Test loader: {len(test_dataset)} samples')
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    
+    # Print results exactly like test.py
+    print("\n=== Test Results ===")
+    for key, value in test_results.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
     
     # Get routing statistics
     final_stats = moe_model.get_routing_stats()
     
-    # Print routing statistics with better formatting
+    # Print routing statistics
     print(f"\n=== Routing Statistics ===")
     total_routed = moe_model.total_routed
     print(f"Total samples routed: {total_routed}")
@@ -445,7 +412,7 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     test_results_path = os.path.join(moe_save_dir, f'moe_results_{dataset_name}.json')
     with open(test_results_path, 'w') as f:
         json_results = {}
-        for k, v in results.items():
+        for k, v in test_results.items():
             if isinstance(v, (np.integer, np.floating, np.ndarray)):
                 json_results[k] = float(v)
             else:
@@ -458,7 +425,7 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     
     print(f"\nResults saved to: {test_results_path}")
     
-    return results, final_stats
+    return test_results, final_stats
 
 def test_only_mode(config, device, dataset_name, expert_weights_dir):
     """Test-only mode: Clean evaluation with detailed routing stats."""
