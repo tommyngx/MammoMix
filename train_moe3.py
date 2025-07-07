@@ -312,17 +312,11 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     
     print(f"Evaluating SimpleMoE on {dataset_name} ({len(test_dataset)} samples)...")
     
-    # Setup training args exactly like test.py
+    # Setup training args exactly like test.py but for evaluation only
     training_cfg = config.get('training', {})
     
     # Extract all training arguments from config like test.py
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
-    learning_rate = training_cfg.get('learning_rate', 5e-5)
-    weight_decay = training_cfg.get('weight_decay', 1e-4)
-    warmup_ratio = training_cfg.get('warmup_ratio', 0.05)
-    lr_scheduler_type = training_cfg.get('lr_scheduler_type', 'cosine_with_restarts')
-    lr_scheduler_kwargs = training_cfg.get('lr_scheduler_kwargs', dict(num_cycles=1))
-    eval_do_concat_batches = training_cfg.get('eval_do_concat_batches', False)
     dataloader_num_workers = training_cfg.get('num_workers', 2)
     gradient_accumulation_steps = training_cfg.get('gradient_accumulation_steps', 2)
     remove_unused_columns = training_cfg.get('remove_unused_columns', False)
@@ -332,27 +326,16 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"SimpleMoE_{dataset_name}_{date_str}"
     
-    # Use exact TrainingArguments from test.py
+    # Use TrainingArguments for evaluation only - fix the eval_strategy issue
     training_args = TrainingArguments(
         output_dir='./temp_eval',
         run_name=run_name,
         per_device_eval_batch_size=per_device_eval_batch_size,
-        learning_rate=learning_rate,
-        weight_decay=weight_decay,
-        warmup_ratio=warmup_ratio,
-        lr_scheduler_type=lr_scheduler_type,
-        lr_scheduler_kwargs=lr_scheduler_kwargs,
-        eval_do_concat_batches=eval_do_concat_batches,
+        eval_strategy="no",  # Set to "no" since we're only doing evaluation
+        save_strategy="no",  # Set to "no" since we're only doing evaluation
         disable_tqdm=False,
         logging_dir="./logs",
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=1,
-        logging_strategy="epoch",
         report_to=[],  # Disable wandb and all external loggers
-        load_best_model_at_end=True,
-        metric_for_best_model='eval_map_50',
-        greater_is_better=True,
         fp16=torch.cuda.is_available(),
         dataloader_num_workers=dataloader_num_workers,
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -362,7 +345,7 @@ def simple_moe_evaluation(config, device, dataset_name, expert_weights_dir):
     # Use evaluation function from evaluation.py exactly like test.py
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
     
-    # Create trainer exactly like test.py
+    # Create trainer exactly like test.py - without eval_dataset since we're only evaluating
     trainer = Trainer(
         model=moe_model,
         args=training_args,
