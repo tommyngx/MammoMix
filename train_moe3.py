@@ -120,7 +120,7 @@ class SimpleDatasetClassifier(nn.Module):
 class SimpleMoE(nn.Module):
     """
     Simple MoE that uses the trained dataset classifier for routing.
-    Much cleaner than the complex router approach.
+    Based on train_moe2.py's ImageRouterMoE structure.
     """
     def __init__(self, expert_models, dataset_classifier, device):
         super().__init__()
@@ -145,28 +145,30 @@ class SimpleMoE(nn.Module):
         print(f'Trainable parameters: {trainable_params / 1e6:.2f}M')
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """Enable gradient checkpointing for compatibility with Transformers Trainer."""
         pass
     
     def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing for compatibility with Transformers Trainer."""
         pass
     
     def forward(self, pixel_values, labels=None, return_routing=False):
-        """Forward pass with dataset classification routing."""
+        """Forward pass with dataset classification routing - based on train_moe2.py structure."""
         batch_size = pixel_values.shape[0]
         
-        # Get dataset predictions
+        # Get dataset predictions using our simple classifier
         with torch.no_grad():
             dataset_logits = self.classifier(pixel_values)
             dataset_probs = F.softmax(dataset_logits, dim=1)
             expert_choices = torch.argmax(dataset_probs, dim=1)
         
-        # Update statistics
+        # Update statistics (only during eval to avoid overhead)
         if not self.training:
             for choice in expert_choices:
                 self.routing_counts[choice] += 1
             self.total_routed += batch_size
         
-        # Group by expert
+        # Group samples by expert choice (same as train_moe2.py)
         expert_groups = {}
         for i in range(batch_size):
             expert_idx = expert_choices[i].item()
@@ -174,14 +176,14 @@ class SimpleMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        # Print routing stats
-        if not self.training and self.total_routed % 100 == 0:
+        # Print routing distribution (reduced frequency like train_moe2.py)
+        if not self.training and self.total_routed % 500 == 0:
             usage_pct = (self.routing_counts / self.total_routed * 100).cpu().numpy()
             print(f"Routing: CSAW={usage_pct[0]:.1f}%, DMID={usage_pct[1]:.1f}%, DDSM={usage_pct[2]:.1f}%")
         
-        # Get expert outputs
+        # Get expert outputs for each group (same as train_moe2.py)
         batch_outputs = {}
-        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        total_detection_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         for expert_idx, sample_indices in expert_groups.items():
             expert_pixel_values = pixel_values[sample_indices]
@@ -189,28 +191,29 @@ class SimpleMoE(nn.Module):
             if labels is not None:
                 expert_labels = [labels[i] for i in sample_indices]
             
-            # Get expert output
+            # Get expert output (frozen expert, no gradients needed)
             with torch.no_grad():
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
+                expert_output = self._fix_expert_output_dimensions(expert_output)
             
             batch_outputs[expert_idx] = {
                 'output': expert_output,
                 'indices': sample_indices
             }
             
-            # Accumulate loss
+            # Accumulate detection loss
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 weight = len(sample_indices) / batch_size
-                total_loss = total_loss + expert_output.loss * weight
+                total_detection_loss = total_detection_loss + expert_output.loss * weight
         
-        # Reconstruct batch outputs
+        # Reconstruct batch outputs in original order (same as train_moe2.py)
         if not batch_outputs:
             raise RuntimeError("No expert outputs generated")
         
         first_expert_idx = list(batch_outputs.keys())[0]
         reference_output = batch_outputs[first_expert_idx]['output']
         
-        # Initialize batch tensors
+        # Initialize batch tensors (same as train_moe2.py)
         num_queries = reference_output.logits.shape[1]
         num_classes = reference_output.logits.shape[2]
         
@@ -218,23 +221,36 @@ class SimpleMoE(nn.Module):
                                  device=pixel_values.device, dtype=reference_output.logits.dtype)
         batch_pred_boxes = torch.zeros(batch_size, num_queries, 4, 
                                      device=pixel_values.device, dtype=reference_output.pred_boxes.dtype)
+        batch_last_hidden_state = None
         
-        # Fill batch tensors
+        if hasattr(reference_output, 'last_hidden_state') and reference_output.last_hidden_state is not None:
+            batch_last_hidden_state = torch.zeros(batch_size, reference_output.last_hidden_state.shape[1], 
+                                                 reference_output.last_hidden_state.shape[2], 
+                                                 device=pixel_values.device, dtype=reference_output.last_hidden_state.dtype)
+        
+        # Fill batch tensors with expert outputs (same as train_moe2.py)
         for expert_idx, group_data in batch_outputs.items():
             expert_output = group_data['output']
             sample_indices = group_data['indices']
             
             batch_logits[sample_indices] = expert_output.logits
-            batch_pred_boxes[sample_indices] = expert_output.pred_boxes[..., :4]
+            batch_pred_boxes[sample_indices] = expert_output.pred_boxes
+            
+            if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
+                batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
         
-        # Create output
+        # Final safety check (same as train_moe2.py)
+        assert batch_pred_boxes.shape[-1] == 4, f"pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
+        batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
+        
+        # Create output (same as train_moe2.py)
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
         
         combined_output = YolosObjectDetectionOutput(
-            loss=total_loss,
+            loss=total_detection_loss,
             logits=batch_logits,
             pred_boxes=batch_pred_boxes,
-            last_hidden_state=None
+            last_hidden_state=batch_last_hidden_state
         )
         
         if return_routing:
@@ -248,8 +264,21 @@ class SimpleMoE(nn.Module):
         else:
             return combined_output
     
+    def _fix_expert_output_dimensions(self, expert_output):
+        """Fix expert output dimensions to ensure pred_boxes has exactly 4 dimensions (from train_moe2.py)."""
+        if expert_output.pred_boxes.shape[-1] != 4:
+            fixed_pred_boxes = expert_output.pred_boxes[..., :4].contiguous()
+            fixed_output = type(expert_output)(
+                loss=expert_output.loss,
+                logits=expert_output.logits,
+                pred_boxes=fixed_pred_boxes,
+                last_hidden_state=expert_output.last_hidden_state if hasattr(expert_output, 'last_hidden_state') else None
+            )
+            return fixed_output
+        return expert_output
+    
     def get_routing_stats(self):
-        """Get routing statistics."""
+        """Get current routing statistics (same as train_moe2.py)."""
         if self.total_routed == 0:
             return {name: 0.0 for name in self.expert_names}
         
@@ -258,6 +287,11 @@ class SimpleMoE(nn.Module):
         for i, name in enumerate(self.expert_names):
             stats[name] = float(usage[i])
         return stats
+    
+    def reset_routing_stats(self):
+        """Reset routing statistics (same as train_moe2.py)."""
+        self.routing_counts.zero_()
+        self.total_routed = 0
 
 def load_expert_models(weight_dir, device):
     """Load expert models."""
@@ -555,11 +589,11 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
     """Run MoE training/testing exactly like train_moe2.py but with our simple classifier."""
     print(f"\n=== Running MoE Training/Testing like train_moe2.py on {dataset_name} ===")
     
-    # Load expert models
+    # Load expert models (same as train_moe2.py)
     expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     image_processor = expert_processors[0]
     
-    # Create MoE model
+    # Create MoE model (same structure as train_moe2.py)
     model = SimpleMoE(expert_models, classifier, device).to(device)
     
     # Create datasets exactly like train_moe2.py
@@ -598,23 +632,24 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
     print(f'Val: {len(val_dataset)} samples') 
     print(f'Test: {len(test_dataset)} samples')
     
-    # Training setup - save to moe_MOMO directory like train_moe2.py
+    # Training setup exactly like train_moe2.py - save to moe_MOMO directory
     output_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
     os.makedirs(output_dir, exist_ok=True)
     
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"SimpleMoE_{dataset_name}_{date_str}"
     
+    # Use exact same training arguments as train_moe2.py
     training_args = TrainingArguments(
-        output_dir=output_dir,  # Save MoE weights to moe_MOMO
+        output_dir=output_dir,
         run_name=run_name,
         num_train_epochs=epoch if epoch else 10,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        learning_rate=1e-5,  # Lower learning rate since router is pre-trained
-        weight_decay=1e-4,
-        warmup_ratio=0.05,
-        lr_scheduler_type='cosine',
+        per_device_train_batch_size=16,  # Same as train_moe2.py
+        per_device_eval_batch_size=16,   # Same as train_moe2.py
+        learning_rate=1e-3,  # Same as train_moe2.py
+        weight_decay=0.0,    # Same as train_moe2.py
+        warmup_ratio=0.0,    # Same as train_moe2.py
+        lr_scheduler_type='constant',  # Same as train_moe2.py
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,
@@ -624,10 +659,12 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
         load_best_model_at_end=True,
         metric_for_best_model='eval_map_50',
         greater_is_better=True,
-        fp16=False,
+        fp16=False,  # Same as train_moe2.py
+        bf16=False,  # Same as train_moe2.py
         dataloader_num_workers=0,
-        gradient_accumulation_steps=2,
+        gradient_accumulation_steps=1,
         remove_unused_columns=False,
+        max_grad_norm=1.0,
         save_safetensors=True,
     )
     
@@ -657,7 +694,7 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
         else:
             print(f"{key}: {value}")
     
-    # Print final routing statistics
+    # Print final routing statistics (same as train_moe2.py)
     print(f"\n=== Final Routing Statistics on {dataset_name} ===")
     final_stats = model.get_routing_stats()
     for expert_name, usage in final_stats.items():
@@ -689,7 +726,111 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
     
     return test_results
 
-def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
+def test_only_mode(config, device, dataset_name, expert_weights_dir):
+    """Test-only mode: Load classifier and test MoE without any training."""
+    print("\n" + "="*60)
+    print("TEST-ONLY MODE: LOADING CLASSIFIER AND TESTING MoE")
+    print("="*60)
+    
+    # Load classifier from moe_MOMO path
+    moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
+    classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
+    
+    if not os.path.exists(classifier_path):
+        # Try to find classifier_final.pth as backup
+        classifier_final_path = os.path.join(moe_save_dir, 'classifier_final.pth')
+        if os.path.exists(classifier_final_path):
+            classifier_path = classifier_final_path
+            print(f"Using final classifier: {classifier_path}")
+        else:
+            raise FileNotFoundError(f"No classifier found in {moe_save_dir}. Run training first.")
+    
+    classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
+    classifier.load_state_dict(torch.load(classifier_path, map_location=device))
+    classifier.eval()
+    print(f"Loaded classifier from: {classifier_path}")
+    
+    # Load expert models
+    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
+    image_processor = expert_processors[0]
+    
+    # Create MoE model
+    model = SimpleMoE(expert_models, classifier, device).to(device)
+    model.eval()
+    print("Created SimpleMoE with loaded classifier")
+    
+    # Create test dataset
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    
+    test_dataset = BreastCancerDataset(
+        split='test',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+    )
+    
+    print(f'Test dataset ({dataset_name}): {len(test_dataset)} samples')
+    
+    # Quick evaluation setup (same as train_moe2.py test mode)
+    training_args = TrainingArguments(
+        output_dir='./temp_test',
+        per_device_eval_batch_size=16,
+        dataloader_num_workers=0,
+        remove_unused_columns=False,
+        report_to=[],
+        fp16=False,
+        bf16=False,
+        eval_do_concat_batches=False,
+        disable_tqdm=False,
+    )
+    
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    print(f"\n=== Testing SimpleMoE on {dataset_name} test set ===")
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    
+    # Print test results exactly like train_moe2.py
+    print(f"\n=== Test Results on {dataset_name} ===")
+    for key, value in test_results.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+    
+    # Print routing statistics
+    print(f"\n=== Routing Statistics on {dataset_name} ===")
+    final_stats = model.get_routing_stats()
+    for expert_name, usage in final_stats.items():
+        print(f"{expert_name}: {usage*100:.1f}%")
+    
+    # Save test results
+    test_results_path = os.path.join(moe_save_dir, f'test_results_{dataset_name}.json')
+    with open(test_results_path, 'w') as f:
+        json_results = {}
+        for k, v in test_results.items():
+            if isinstance(v, (np.integer, np.floating, np.ndarray)):
+                json_results[k] = float(v)
+            else:
+                json_results[k] = v
+        json_results['routing_stats'] = final_stats
+        json_results['dataset'] = dataset_name
+        json.dump(json_results, f, indent=2)
+    
+    print(f"Test results saved to: {test_results_path}")
+    
+    return test_results
+
+def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None, test=False):
     """Main function - automatically runs both phases if not specified."""
     config = load_config(config_path)
     
@@ -704,6 +845,16 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
     print(f"Expert weights: {expert_weights_dir}")
     if dataset:
         print(f"Target dataset: {dataset}")
+    
+    # Test-only mode
+    if test:
+        target_dataset = dataset if dataset else 'CSAW'
+        print(f"Running test-only mode on dataset: {target_dataset}")
+        results = test_only_mode(config, device, target_dataset, expert_weights_dir)
+        print("\n" + "="*60)
+        print("TEST-ONLY MODE COMPLETED!")
+        print("="*60)
+        return results
     
     # If no phase specified, run both phases automatically
     if phase is None:
@@ -736,7 +887,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
         print("="*60)
         
         # Load classifier from moe_MOMO path
-        moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
+        moe_save_dir = os.path.join(weight_dir, 'moe_MOMO')
         classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
         
         if not os.path.exists(classifier_path):
@@ -768,6 +919,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name for testing (CSAW/DMID/DDSM)')
     parser.add_argument('--weight_dir', type=str, default=None, help='Expert weights directory')
     parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase (1: train only, 2: test only, None: both)')
+    parser.add_argument('--test', action='store_true', help='Test-only mode: load classifier and test MoE without training')
     args = parser.parse_args()
 
-    main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase)
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase, args.test)
