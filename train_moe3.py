@@ -119,8 +119,8 @@ class SimpleDatasetClassifier(nn.Module):
 
 class SimpleMoE(nn.Module):
     """
-    Simple MoE that uses the trained dataset classifier for routing.
-    Based on train_moe2.py's ImageRouterMoE structure.
+    Đơn giản: classifier chọn expert → lấy output expert → đưa ra kết quả
+    Không phức tạp, freeze expert, evaluate như test.py
     """
     def __init__(self, expert_models, dataset_classifier, device):
         super().__init__()
@@ -129,47 +129,59 @@ class SimpleMoE(nn.Module):
         self.device = device
         self.expert_names = ['CSAW', 'DMID', 'DDSM']
         
-        # Freeze everything except classifier
+        # Freeze ALL experts - không train gì cả
         for expert in self.experts:
             for param in expert.parameters():
                 param.requires_grad = False
+            expert.eval()  # Luôn eval mode
+        
+        # Freeze classifier luôn - chỉ dùng để route
+        for param in self.classifier.parameters():
+            param.requires_grad = False
+        self.classifier.eval()  # Luôn eval mode
         
         # Statistics
         self.routing_counts = torch.zeros(3, device=device)
         self.total_routed = 0
         
-        print(f"SimpleMoE initialized with dataset classifier routing")
+        print(f"SimpleMoE: Tất cả đều frozen, chỉ route và evaluate")
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f'Total parameters: {total_params / 1e6:.2f}M')
-        print(f'Trainable parameters: {trainable_params / 1e6:.2f}M')
+        print(f'Trainable parameters: {trainable_params:.0f} (should be 0)')
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        """Enable gradient checkpointing for compatibility with Transformers Trainer."""
         pass
     
     def gradient_checkpointing_disable(self):
-        """Disable gradient checkpointing for compatibility with Transformers Trainer."""
         pass
     
     def forward(self, pixel_values, labels=None, return_routing=False):
-        """Forward pass with dataset classification routing - EXACTLY like train_moe2.py"""
+        """
+        ĐƠN GIẢN: 
+        1. Classifier chọn expert cho mỗi ảnh
+        2. Gọi expert tương ứng
+        3. Gộp output lại theo thứ tự
+        4. Trả về - XONG!
+        """
         batch_size = pixel_values.shape[0]
         
-        # Get dataset predictions using our simple classifier
-        # CRITICAL: Use no_grad for classifier during expert inference to avoid interference
+        # 1. Classifier chọn expert - LUÔN no_grad
         with torch.no_grad():
             dataset_logits = self.classifier(pixel_values)
-            dataset_probs = F.softmax(dataset_logits, dim=1)
-            expert_choices = torch.argmax(dataset_probs, dim=1)
+            expert_choices = torch.argmax(dataset_logits, dim=1)
         
-        # Update statistics (only during eval to avoid overhead)
+        # Statistics
         if not self.training:
             for choice in expert_choices:
                 self.routing_counts[choice] += 1
             self.total_routed += batch_size
+            
+            if self.total_routed % 100 == 0:
+                usage_pct = (self.routing_counts / self.total_routed * 100).cpu().numpy()
+                print(f"Routing: CSAW={usage_pct[0]:.1f}%, DMID={usage_pct[1]:.1f}%, DDSM={usage_pct[2]:.1f}%")
         
-        # Group samples by expert choice (same as train_moe2.py)
+        # 2. Group by expert - đơn giản
         expert_groups = {}
         for i in range(batch_size):
             expert_idx = expert_choices[i].item()
@@ -177,93 +189,60 @@ class SimpleMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        # Print routing distribution (reduced frequency like train_moe2.py)
-        if not self.training and self.total_routed % 500 == 0:
-            usage_pct = (self.routing_counts / self.total_routed * 100).cpu().numpy()
-            print(f"Routing: CSAW={usage_pct[0]:.1f}%, DMID={usage_pct[1]:.1f}%, DDSM={usage_pct[2]:.1f}%")
-        
-        # Get expert outputs for each group (EXACTLY like train_moe2.py)
-        batch_outputs = {}
-        total_detection_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        # 3. Gọi expert cho từng group - LUÔN no_grad vì đã freeze
+        all_logits = []
+        all_pred_boxes = []
+        sample_to_output = {}  # Map sample index to output
         
         for expert_idx, sample_indices in expert_groups.items():
             expert_pixel_values = pixel_values[sample_indices]
-            expert_labels = None
-            if labels is not None:
-                expert_labels = [labels[i] for i in sample_indices]
             
-            # CRITICAL FIX: Use EXACTLY the same approach as train_moe2.py
-            # Get expert output (frozen expert, no gradients needed) - ALWAYS use no_grad
+            # Gọi expert - NO LABELS để tránh loss computation
             with torch.no_grad():
-                expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-                expert_output = self._fix_expert_output_dimensions(expert_output)
+                expert_output = self.experts[expert_idx](expert_pixel_values)
             
-            batch_outputs[expert_idx] = {
-                'output': expert_output,
-                'indices': sample_indices
-            }
-            
-            # Accumulate detection loss EXACTLY like train_moe2.py
-            if hasattr(expert_output, 'loss') and expert_output.loss is not None:
-                weight = len(sample_indices) / batch_size
-                total_detection_loss = total_detection_loss + expert_output.loss * weight
+            # Lưu output cho từng sample
+            for i, sample_idx in enumerate(sample_indices):
+                sample_to_output[sample_idx] = {
+                    'logits': expert_output.logits[i],  # [num_queries, num_classes]
+                    'pred_boxes': expert_output.pred_boxes[i],  # [num_queries, 4]
+                }
         
-        # Reconstruct batch outputs in original order (same as train_moe2.py)
-        if not batch_outputs:
-            raise RuntimeError("No expert outputs generated")
+        # 4. Gộp lại theo đúng thứ tự batch
+        batch_logits = []
+        batch_pred_boxes = []
         
-        first_expert_idx = list(batch_outputs.keys())[0]
-        reference_output = batch_outputs[first_expert_idx]['output']
+        for i in range(batch_size):
+            if i in sample_to_output:
+                batch_logits.append(sample_to_output[i]['logits'])
+                batch_pred_boxes.append(sample_to_output[i]['pred_boxes'])
+            else:
+                # Không có output - tạo dummy (không nên xảy ra)
+                print(f"WARNING: No output for sample {i}")
+                dummy_logits = torch.zeros((100, 2), device=pixel_values.device)  # YOLOS default
+                dummy_boxes = torch.zeros((100, 4), device=pixel_values.device)
+                batch_logits.append(dummy_logits)
+                batch_pred_boxes.append(dummy_boxes)
         
-        # Initialize batch tensors (same as train_moe2.py)
-        num_queries = reference_output.logits.shape[1]
-        num_classes = reference_output.logits.shape[2]
+        # Stack thành batch tensors
+        batch_logits = torch.stack(batch_logits, dim=0)  # [batch_size, num_queries, num_classes]
+        batch_pred_boxes = torch.stack(batch_pred_boxes, dim=0)  # [batch_size, num_queries, 4]
         
-        batch_logits = torch.zeros(batch_size, num_queries, num_classes, 
-                                 device=pixel_values.device, dtype=reference_output.logits.dtype)
-        batch_pred_boxes = torch.zeros(batch_size, num_queries, 4, 
-                                     device=pixel_values.device, dtype=reference_output.pred_boxes.dtype)
-        batch_last_hidden_state = None
-        
-        if hasattr(reference_output, 'last_hidden_state') and reference_output.last_hidden_state is not None:
-            batch_last_hidden_state = torch.zeros(batch_size, reference_output.last_hidden_state.shape[1], 
-                                                 reference_output.last_hidden_state.shape[2], 
-                                                 device=pixel_values.device, dtype=reference_output.last_hidden_state.dtype)
-        
-        # Fill batch tensors with expert outputs (same as train_moe2.py)
-        for expert_idx, group_data in batch_outputs.items():
-            expert_output = group_data['output']
-            sample_indices = group_data['indices']
-            
-            # CRITICAL: Ensure proper tensor copying without gradient issues
-            batch_logits[sample_indices] = expert_output.logits.detach()
-            batch_pred_boxes[sample_indices] = expert_output.pred_boxes.detach()
-            
-            if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state') and expert_output.last_hidden_state is not None:
-                batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state.detach()
-        
-        # Final safety check (same as train_moe2.py)
-        assert batch_pred_boxes.shape[-1] == 4, f"pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
+        # Ensure 4 dimensions for boxes
         batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
         
-        # Create output (same as train_moe2.py) - CRITICAL: Handle loss properly
+        # 5. Tạo output như test.py - KHÔNG có loss
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
         
-        # IMPORTANT: Only include loss if we have labels, otherwise None for evaluation
-        final_loss = None
-        if labels is not None:
-            final_loss = total_detection_loss
-        
         combined_output = YolosObjectDetectionOutput(
-            loss=final_loss,
+            loss=None,  # Không có loss - chỉ inference
             logits=batch_logits,
             pred_boxes=batch_pred_boxes,
-            last_hidden_state=batch_last_hidden_state
+            last_hidden_state=None
         )
         
         if return_routing:
             routing_info = {
-                'probs': dataset_probs,
                 'choices': expert_choices,
                 'groups': expert_groups,
                 'stats': self.get_routing_stats()
@@ -272,21 +251,8 @@ class SimpleMoE(nn.Module):
         else:
             return combined_output
     
-    def _fix_expert_output_dimensions(self, expert_output):
-        """Fix expert output dimensions to ensure pred_boxes has exactly 4 dimensions (from train_moe2.py)."""
-        if expert_output.pred_boxes.shape[-1] != 4:
-            fixed_pred_boxes = expert_output.pred_boxes[..., :4].contiguous()
-            fixed_output = type(expert_output)(
-                loss=expert_output.loss,
-                logits=expert_output.logits,
-                pred_boxes=fixed_pred_boxes,
-                last_hidden_state=expert_output.last_hidden_state if hasattr(expert_output, 'last_hidden_state') else None
-            )
-            return fixed_output
-        return expert_output
-    
     def get_routing_stats(self):
-        """Get current routing statistics (same as train_moe2.py)."""
+        """Get routing statistics."""
         if self.total_routed == 0:
             return {name: 0.0 for name in self.expert_names}
         
@@ -297,7 +263,7 @@ class SimpleMoE(nn.Module):
         return stats
     
     def reset_routing_stats(self):
-        """Reset routing statistics (same as train_moe2.py)."""
+        """Reset routing statistics."""
         self.routing_counts.zero_()
         self.total_routed = 0
 
@@ -528,31 +494,24 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
     return classifier
 
 def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, dataset_name=None):
-    """Test MoE with current classifier on specific dataset - EXACTLY like train_moe2.py evaluation."""
+    """Test MoE đơn giản - chỉ inference như test.py"""
     try:
         # Load expert models
         expert_models, _ = load_expert_models(weight_dir, device)
         
-        # Create MoE
+        # Create MoE - tất cả frozen
         moe_model = SimpleMoE(expert_models, classifier, device).to(device)
         moe_model.eval()
         
-        # CRITICAL: Reset routing stats for clean evaluation
-        moe_model.reset_routing_stats()
-        
-        # CRITICAL: Ensure classifier is also in eval mode
-        moe_model.classifier.eval()
-        
-        # Create test dataset - use specific dataset if provided
+        # Dataset
         MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
         image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
         
         if dataset_name:
-            # Test on specific dataset only
             test_dataset, _ = create_dataset_with_labels(config, image_processor, dataset_name, 'test')
-            print(f"Testing MoE on {dataset_name} dataset: {len(test_dataset)} samples")
+            print(f"Testing MoE on {dataset_name}: {len(test_dataset)} samples")
         else:
-            # Test on combined datasets (original behavior)
+            # Combined datasets
             test_datasets = []
             for ds_name in ['CSAW', 'DMID', 'DDSM']:
                 test_dataset, _ = create_dataset_with_labels(config, image_processor, ds_name, 'test')
@@ -560,21 +519,19 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, 
             
             from torch.utils.data import ConcatDataset
             test_dataset = ConcatDataset(test_datasets)
-            print(f"Testing MoE on combined datasets: {len(test_dataset)} samples")
+            print(f"Testing MoE on combined: {len(test_dataset)} samples")
         
-        # Use EXACTLY the same evaluation setup as train_moe2.py
+        # Evaluation như test.py - ĐƠN GIẢN
         training_args = TrainingArguments(
             output_dir='./temp_eval',
-            per_device_eval_batch_size=8,  # Smaller batch size for stability
+            per_device_eval_batch_size=8,
             dataloader_num_workers=0,
             remove_unused_columns=False,
             report_to=[],
-            fp16=False,  # Same as train_moe2.py
-            bf16=False,  # Same as train_moe2.py
+            fp16=False,
+            bf16=False,
             eval_do_concat_batches=False,
             disable_tqdm=False,
-            dataloader_pin_memory=False,  # Disable for stability
-            eval_strategy="no",  # Only evaluate when called
         )
         
         eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
@@ -588,44 +545,22 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, 
         )
         
         print("Running evaluation...")
-        
-        # CRITICAL: Ensure model is in eval mode before evaluation
-        moe_model.eval()
-        moe_model.classifier.eval()
-        
-        # Clear CUDA cache before evaluation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
         results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
         
-        # Safe result processing with type checking
+        # Print results
         test_name = dataset_name if dataset_name else "Combined"
         print(f"Epoch {epoch_num} MoE Results on {test_name}:")
         
-        if isinstance(results, dict):
-            for key, value in results.items():
-                try:
-                    if isinstance(value, (int, float, np.integer, np.floating)):
-                        print(f"  {key}: {float(value):.4f}")
-                    else:
-                        print(f"  {key}: {value}")
-                except Exception as e:
-                    print(f"  {key}: {value} (error formatting: {e})")
-        else:
-            print(f"Unexpected results type: {type(results)}")
-            print(f"Results: {results}")
-        
-        # Print routing stats with error handling
-        try:
-            stats = moe_model.get_routing_stats()
-            if isinstance(stats, dict):
-                routing_str = ", ".join([f"{name}={usage*100:.1f}%" for name, usage in stats.items()])
-                print(f"Routing: {routing_str}")
+        for key, value in results.items():
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                print(f"  {key}: {float(value):.4f}")
             else:
-                print(f"Routing stats: {stats}")
-        except Exception as e:
-            print(f"Error getting routing stats: {e}")
+                print(f"  {key}: {value}")
+        
+        # Routing stats
+        stats = moe_model.get_routing_stats()
+        routing_str = ", ".join([f"{name}={usage*100:.1f}%" for name, usage in stats.items()])
+        print(f"Routing: {routing_str}")
         
         return results
         
@@ -636,16 +571,81 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, 
         return None
 
 def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_weights_dir, epoch=None):
-    """Run MoE training/testing exactly like train_moe2.py but with our simple classifier."""
-    print(f"\n=== Running MoE Training/Testing like train_moe2.py on {dataset_name} ===")
+    """Run MoE - KHÔNG TRAIN GÌ CẢ, chỉ inference như test.py"""
+    print(f"\n=== Testing SimpleMoE trên {dataset_name} - KHÔNG TRAIN ===")
     
     try:
-        # Load expert models (same as train_moe2.py)
         expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
         image_processor = expert_processors[0]
         
-        # Create MoE model (same structure as train_moe2.py)
+        # Create MoE - tất cả frozen
         model = SimpleMoE(expert_models, classifier, device).to(device)
+        model.eval()
+        
+        # Save initial MoE
+        moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
+        os.makedirs(moe_save_dir, exist_ok=True)
+        
+        initial_moe_path = os.path.join(moe_save_dir, 'moe_initial.pth')
+        torch.save(model.state_dict(), initial_moe_path)
+        print(f"MoE model saved to: {initial_moe_path}")
+        
+        # Create test dataset
+        SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+        MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+        
+        test_dataset = BreastCancerDataset(
+            split='test',
+            splits_dir=SPLITS_DIR,
+            dataset_name=dataset_name,
+            image_processor=image_processor,
+            model_type=get_model_type(MODEL_NAME),
+            dataset_epoch=epoch
+        )
+        
+        print(f'Test dataset: {len(test_dataset)} samples')
+        
+        # Setup evaluation như test.py
+        import datetime
+        date_str = datetime.datetime.now().strftime("%d%m%y")
+        run_name = f"SimpleMoE_{dataset_name}_{date_str}"
+        
+        training_args = TrainingArguments(
+            output_dir=moe_save_dir,
+            run_name=run_name,
+            per_device_eval_batch_size=8,
+            dataloader_num_workers=0,
+            remove_unused_columns=False,
+            report_to=[],
+            fp16=torch.cuda.is_available(),
+            eval_do_concat_batches=False,
+            disable_tqdm=False,
+        )
+        
+        eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+        
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            processing_class=image_processor,
+            data_collator=collate_fn,
+            compute_metrics=eval_compute_metrics_fn,
+        )
+        
+        print(f"\n=== Testing SimpleMoE on {dataset_name} ===")
+        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+        
+        # Print results như test.py
+        print(f"\n=== Test Results on {dataset_name} ===")
+        for key, value in test_results.items():
+            if isinstance(value, float):
+                print(f"{key}: {value:.4f}")
+            else:
+                print(f"{key}: {value}")
+        
+        # Routing statistics
+        print(f"\n=== Routing Statistics ===")
+        final_stats = model.get_routing_stats()
         
         # CRITICAL: Ensure classifier starts in correct mode
         model.classifier.eval()  # Keep classifier frozen during training
