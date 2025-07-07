@@ -93,9 +93,7 @@ class SimpleDatasetClassifier(nn.Module):
         # Initialize weights
         self._initialize_weights()
         
-        print(f"SimpleDatasetClassifier initialized for {num_classes} datasets")
-        total_params = sum(p.numel() for p in self.parameters())
-        print(f'Total parameters: {total_params / 1e6:.2f}M')
+        # Suppress initialization message
     
     def _initialize_weights(self):
         """Initialize weights properly."""
@@ -144,11 +142,7 @@ class SimpleMoE(nn.Module):
         self.routing_counts = torch.zeros(3, device=device)
         self.total_routed = 0
         
-        print(f"SimpleMoE: Tất cả đều frozen, chỉ route và evaluate")
-        total_params = sum(p.numel() for p in self.parameters())
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f'Total parameters: {total_params / 1e6:.2f}M')
-        print(f'Trainable parameters: {trainable_params:.0f} (should be 0)')
+        # Suppress initialization message
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         pass
@@ -280,7 +274,7 @@ class SimpleMoE(nn.Module):
         self.total_routed = 0
 
 def load_expert_models(weight_dir, device):
-    """Load expert models."""
+    """Load expert models (suppress messages)."""
     expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM']
     expert_paths = [os.path.join(weight_dir, name) for name in expert_names]
     
@@ -288,7 +282,7 @@ def load_expert_models(weight_dir, device):
     processors = []
     
     for path in expert_paths:
-        print(f"Loading expert from: {path}")
+        # Suppress loading messages
         processor = AutoImageProcessor.from_pretrained(path)
         model = AutoModelForObjectDetection.from_pretrained(
             path,
@@ -1045,14 +1039,14 @@ def create_trainer_for_evaluation(model, image_processor, test_dataset):
     return trainer
 
 def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
-    """Simple test comparison without using evaluation.py to avoid the bug."""
-    print(f"\n=== SIMPLE TEST: SimpleMoE vs Individual Expert on {dataset_name} ===")
+    """Complete test comparison with mAP evaluation like test.py."""
+    print(f"\n=== SimpleMoE vs Individual Expert on {dataset_name} (Full Evaluation) ===")
     
-    # Load expert models
+    # Load expert models (suppress loading messages)
     expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     image_processor = expert_processors[0]
     
-    # Load classifier
+    # Load classifier (suppress loading messages)
     moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
     classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
     classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
@@ -1078,8 +1072,6 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
     expert_idx = dataset_map[dataset_name]
     individual_expert = expert_models[expert_idx]
     
-    print(f"\n1. Testing individual {dataset_name} expert...")
-    
     # Helper function to move labels to device
     def move_labels_to_device(labels_list, target_device):
         """Move all label tensors to target device."""
@@ -1097,7 +1089,10 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
             moved_labels.append(moved_dict)
         return moved_labels
     
-    # Simple forward pass without evaluation metrics
+    # 1. Quick loss comparison (no progress bars)
+    print(f"\n1. Loss Comparison:")
+    
+    # Test individual expert
     individual_expert.eval()
     total_loss = 0.0
     num_batches = 0
@@ -1105,11 +1100,9 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
     test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, collate_fn=collate_fn)
     
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Individual Expert"):
+        for batch in test_loader:
             pixel_values = batch['pixel_values'].to(device)
             labels = batch['labels']
-            
-            # CRITICAL: Move labels to same device as model
             labels = move_labels_to_device(labels, device)
             
             output = individual_expert(pixel_values, labels=labels)
@@ -1119,11 +1112,8 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
                 num_batches += 1
     
     avg_loss_individual = total_loss / num_batches if num_batches > 0 else 0.0
-    print(f"Individual {dataset_name} Expert - Average Loss: {avg_loss_individual:.4f}")
     
     # Test SimpleMoE
-    print(f"\n2. Testing SimpleMoE on {dataset_name}...")
-    
     moe_model = SimpleMoE(expert_models, classifier, device).to(device)
     moe_model.eval()
     moe_model.reset_routing_stats()
@@ -1132,11 +1122,9 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
     num_batches_moe = 0
     
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="SimpleMoE"):
+        for batch in test_loader:
             pixel_values = batch['pixel_values'].to(device)
             labels = batch['labels']
-            
-            # CRITICAL: Move labels to same device as model
             labels = move_labels_to_device(labels, device)
             
             output = moe_model(pixel_values, labels=labels)
@@ -1146,124 +1134,142 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
                 num_batches_moe += 1
     
     avg_loss_moe = total_loss_moe / num_batches_moe if num_batches_moe > 0 else 0.0
-    print(f"SimpleMoE - Average Loss: {avg_loss_moe:.4f}")
     
-    # Compare results
-    print(f"\n3. Comparison:")
-    print(f"Individual Expert Loss: {avg_loss_individual:.4f}")
+    print(f"Individual {dataset_name} Expert Loss: {avg_loss_individual:.4f}")
     print(f"SimpleMoE Loss: {avg_loss_moe:.4f}")
     print(f"Loss Difference: {abs(avg_loss_individual - avg_loss_moe):.4f}")
     
-    # Routing stats
-    final_stats = moe_model.get_routing_stats()
-    print(f"\n4. Routing Statistics:")
-    for expert_name, usage in final_stats.items():
-        print(f"  {expert_name}: {usage*100:.1f}%")
+    # 2. Full mAP evaluation like test.py
+    print(f"\n2. Complete mAP Evaluation (like test.py):")
     
-    routing_to_target = final_stats.get(dataset_name, 0.0)
-    print(f"\nRouting to correct expert ({dataset_name}): {routing_to_target*100:.1f}%")
+    individual_map50 = 0.0
+    moe_map50 = 0.0
+    individual_results = {}
+    moe_results = {}
     
-    if routing_to_target > 0.95:  # 95%+ routing to correct expert
-        print("✓ Routing is correct (>95%)")
-        if abs(avg_loss_individual - avg_loss_moe) < 0.1:  # Similar loss
-            print("✓ Results are equivalent (loss difference < 0.1)")
-            print("🎉 SimpleMoE is working correctly!")
-        else:
-            print("⚠️ Results differ - may need investigation")
-    else:
-        print("✗ Routing is incorrect (<95%)")
-        print("❌ Classifier may need retraining")
-    
-    # ADDED: Full mAP evaluation like test.py
-    print(f"\n5. Complete mAP Evaluation (like test.py):")
     try:
-        # Individual Expert mAP evaluation
-        print(f"\n--- Individual {dataset_name} Expert mAP ---")
-        individual_trainer = create_trainer_for_evaluation(individual_expert, image_processor, test_dataset)
+        # Individual Expert mAP evaluation (exactly like test.py)
+        print(f"\n--- Individual {dataset_name} Expert ---")
+        
+        training_args_individual = TrainingArguments(
+            output_dir='./temp_individual',
+            per_device_eval_batch_size=8,
+            dataloader_num_workers=0,
+            remove_unused_columns=False,
+            report_to=[],
+            fp16=torch.cuda.is_available(),
+            eval_do_concat_batches=False,
+            disable_tqdm=False,
+        )
+        
+        eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+        
+        individual_trainer = Trainer(
+            model=individual_expert,
+            args=training_args_individual,
+            processing_class=image_processor,
+            data_collator=collate_fn,
+            compute_metrics=eval_compute_metrics_fn,
+        )
+        
         individual_results = individual_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='individual')
+        individual_map50 = individual_results.get('individual_map_50', 0.0)
         
         print(f"Individual {dataset_name} Expert Results:")
         for key, value in individual_results.items():
             if isinstance(value, float):
                 print(f"  {key}: {value:.4f}")
         
-        # SimpleMoE mAP evaluation
-        print(f"\n--- SimpleMoE mAP ---")
-        moe_trainer = create_trainer_for_evaluation(moe_model, image_processor, test_dataset)
+        # SimpleMoE mAP evaluation (exactly like test.py)
+        print(f"\n--- SimpleMoE ---")
+        
+        training_args_moe = TrainingArguments(
+            output_dir='./temp_moe',
+            per_device_eval_batch_size=8,
+            dataloader_num_workers=0,
+            remove_unused_columns=False,
+            report_to=[],
+            fp16=torch.cuda.is_available(),
+            eval_do_concat_batches=False,
+            disable_tqdm=False,
+        )
+        
+        moe_trainer = Trainer(
+            model=moe_model,
+            args=training_args_moe,
+            processing_class=image_processor,
+            data_collator=collate_fn,
+            compute_metrics=eval_compute_metrics_fn,
+        )
+        
         moe_results = moe_trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='moe')
+        moe_map50 = moe_results.get('moe_map_50', 0.0)
         
         print(f"SimpleMoE Results:")
         for key, value in moe_results.items():
             if isinstance(value, float):
                 print(f"  {key}: {value:.4f}")
-        
-        # Final comparison with mAP
-        individual_map50 = individual_results.get('individual_map_50', 0.0)
-        moe_map50 = moe_results.get('moe_map_50', 0.0)
-        
-        print(f"\n--- Final mAP Comparison ---")
-        print(f"Individual Expert mAP@50: {individual_map50:.4f}")
-        print(f"SimpleMoE mAP@50: {moe_map50:.4f}")
-        print(f"mAP Difference: {abs(individual_map50 - moe_map50):.4f}")
-        
-        if abs(individual_map50 - moe_map50) < 0.01:
-            print("✓ mAP results are equivalent!")
-        else:
-            print("⚠️ mAP results differ")
-        
-        return {
-            'individual_loss': avg_loss_individual,
-            'moe_loss': avg_loss_moe,
-            'individual_map50': individual_map50,
-            'moe_map50': moe_map50,
-            'routing_stats': final_stats,
-            'routing_accuracy': routing_to_target,
-            'individual_results': individual_results,
-            'moe_results': moe_results
-        }
-        
+                
     except Exception as e:
-        print(f"mAP evaluation failed (evaluation.py bug): {e}")
-        print("But loss comparison above is sufficient to verify SimpleMoE correctness")
-        
-        return {
-            'individual_loss': avg_loss_individual,
-            'moe_loss': avg_loss_moe,
-            'routing_stats': final_stats,
-            'routing_accuracy': routing_to_target,
-            'evaluation_error': str(e)
-        }
-
-def create_trainer_for_evaluation(model, image_processor, test_dataset):
-    """Create a trainer for evaluation like test.py."""
-    training_args = TrainingArguments(
-        output_dir='./temp_eval',
-        per_device_eval_batch_size=8,
-        dataloader_num_workers=0,
-        remove_unused_columns=False,
-        report_to=[],
-        fp16=False,
-        bf16=False,
-        eval_do_concat_batches=False,
-        disable_tqdm=False,
-    )
+        print(f"mAP evaluation failed: {e}")
+        print("Using loss comparison only")
     
-    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    # 3. Routing analysis
+    final_stats = moe_model.get_routing_stats()
+    routing_to_target = final_stats.get(dataset_name, 0.0)
     
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        processing_class=image_processor,
-        data_collator=collate_fn,
-        compute_metrics=eval_compute_metrics_fn,
-    )
+    print(f"\n3. Routing Analysis:")
+    print(f"Routing Statistics:")
+    for expert_name, usage in final_stats.items():
+        print(f"  {expert_name}: {usage*100:.1f}%")
+    print(f"Routing to correct expert ({dataset_name}): {routing_to_target*100:.1f}%")
     
-    return trainer
+    # 4. Final comparison (like test.py output format)
+    print(f"\n=== Final Comparison (test.py style) ===")
+    print(f"Individual {dataset_name} Expert:")
+    print(f"  Loss: {avg_loss_individual:.4f}")
+    print(f"  mAP@50: {individual_map50:.4f}")
+    
+    print(f"\nSimpleMoE:")
+    print(f"  Loss: {avg_loss_moe:.4f}")
+    print(f"  mAP@50: {moe_map50:.4f}")
+    
+    print(f"\nDifferences:")
+    print(f"  Loss Difference: {abs(avg_loss_individual - avg_loss_moe):.4f}")
+    print(f"  mAP@50 Difference: {abs(individual_map50 - moe_map50):.4f}")
+    
+    # 5. Status evaluation
+    print(f"\n=== Status ===")
+    if routing_to_target > 0.95:
+        print("✓ Routing is correct (>95%)")
+        if abs(avg_loss_individual - avg_loss_moe) < 0.1:
+            print("✓ Loss results are equivalent")
+            if abs(individual_map50 - moe_map50) < 0.01:
+                print("✓ mAP results are equivalent")
+                print("🎉 SimpleMoE is working perfectly!")
+            else:
+                print("⚠️ mAP results differ slightly")
+        else:
+            print("⚠️ Loss results differ - may need investigation")
+    else:
+        print("✗ Routing is incorrect (<95%)")
+        print("❌ Classifier may need retraining")
+    
+    return {
+        'individual_loss': avg_loss_individual,
+        'moe_loss': avg_loss_moe,
+        'individual_map50': individual_map50,
+        'moe_map50': moe_map50,
+        'routing_stats': final_stats,
+        'routing_accuracy': routing_to_target,
+        'individual_results': individual_results,
+        'moe_results': moe_results
+    }
 
 def test_only_mode(config, device, dataset_name, expert_weights_dir):
-    """Test-only mode: Load classifier and test MoE without any training."""
+    """Test-only mode with complete evaluation like test.py."""
     print("\n" + "="*60)
-    print("TEST-ONLY MODE: LOADING CLASSIFIER AND TESTING MoE")
+    print("TEST-ONLY MODE: SimpleMoE Complete Evaluation")
     print("="*60)
     
     # Load classifier from moe_MOMO path
@@ -1298,27 +1304,14 @@ def test_only_mode(config, device, dataset_name, expert_weights_dir):
     torch.save(model.state_dict(), test_moe_path)
     print(f"Test-only MoE model saved to: {test_moe_path}")
     
-    # Create test dataset
-    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
-    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    print(f'Test dataset ({dataset_name}): processing...')
     
-    test_dataset = BreastCancerDataset(
-        split='test',
-        splits_dir=SPLITS_DIR,
-        dataset_name=dataset_name,
-        image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
-    )
-    
-    print(f'Test dataset ({dataset_name}): {len(test_dataset)} samples')
-    
-    # Use simple test instead of complex evaluation to avoid evaluation.py bug
-    print(f"\n=== Running Simple Test (avoiding evaluation.py bug) ===")
+    # Run complete comparison (includes mAP evaluation like test.py)
     try:
         test_results = simple_test_comparison(config, device, dataset_name, expert_weights_dir)
         
         # Save test results
-        test_results_path = os.path.join(moe_save_dir, f'simple_test_results_{dataset_name}.json')
+        test_results_path = os.path.join(moe_save_dir, f'complete_test_results_{dataset_name}.json')
         with open(test_results_path, 'w') as f:
             json_results = {}
             for k, v in test_results.items():
@@ -1331,173 +1324,13 @@ def test_only_mode(config, device, dataset_name, expert_weights_dir):
             json_results['dataset'] = dataset_name
             json.dump(json_results, f, indent=2)
         
-        print(f"Simple test results saved to: {test_results_path}")
+        print(f"\nComplete test results saved to: {test_results_path}")
+        print(f"Test-only MoE model saved to: {test_moe_path}")
         
         return test_results
         
     except Exception as e:
-        print(f"Simple test failed: {e}")
+        print(f"Complete test failed: {e}")
         import traceback
         traceback.print_exc()
-    
-    # Fallback: Try the original evaluation approach
-    print(f"\n=== Fallback: Trying original evaluation (may fail due to evaluation.py bug) ===")
-    try:
-        # Quick evaluation setup (same as train_moe2.py test mode)
-        training_args = TrainingArguments(
-            output_dir='./temp_test',
-            per_device_eval_batch_size=8,  # Smaller batch size for stability
-            dataloader_num_workers=0,
-            remove_unused_columns=False,
-            report_to=[],
-            fp16=False,
-            bf16=False,
-            eval_do_concat_batches=False,
-            disable_tqdm=False,
-        )
-        
-        eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
-        
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            processing_class=image_processor,
-            data_collator=collate_fn,
-            compute_metrics=eval_compute_metrics_fn,
-        )
-        
-        print(f"\n=== Testing SimpleMoE on {dataset_name} test set ===")
-        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-        
-        # Print test results exactly like train_moe2.py
-        print(f"\n=== Test Results on {dataset_name} ===")
-        for key, value in test_results.items():
-            if isinstance(value, float):
-                print(f"{key}: {value:.4f}")
-            else:
-                print(f"{key}: {value}")
-        
-        # Print routing statistics
-        print(f"\n=== Routing Statistics on {dataset_name} ===")
-        final_stats = model.get_routing_stats()
-        for expert_name, usage in final_stats.items():
-            print(f"{expert_name}: {usage*100:.1f}%")
-        
-        # Save test results
-        test_results_path = os.path.join(moe_save_dir, f'test_results_{dataset_name}.json')
-        with open(test_results_path, 'w') as f:
-            json_results = {}
-            for k, v in test_results.items():
-                if isinstance(v, (np.integer, np.floating, np.ndarray)):
-                    json_results[k] = float(v)
-                else:
-                    json_results[k] = v
-            json_results['routing_stats'] = final_stats
-            json_results['dataset'] = dataset_name
-            json.dump(json_results, f, indent=2)
-        
-        print(f"Test results saved to: {test_results_path}")
-        
-        return test_results
-        
-    except Exception as e:
-        print(f"Original evaluation also failed: {e}")
-        print("This is likely due to the evaluation.py bug with batch_boxes variable")
-        print("The simple test above should be sufficient to verify SimpleMoE functionality")
         return {'error': str(e)}
-    
-    print(f"Test-only MoE model saved to: {test_moe_path}")
-
-def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None, test=False):
-    """Main function - automatically runs both phases if not specified."""
-    config = load_config(config_path)
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    if weight_dir is not None:
-        expert_weights_dir = weight_dir
-    else:
-        expert_weights_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
-    
-    print(f"Using device: {device}")
-    print(f"Expert weights: {expert_weights_dir}")
-    if dataset:
-        print(f"Target dataset: {dataset}")
-    
-    # Test-only mode
-    if test:
-        target_dataset = dataset if dataset else 'CSAW'
-        print(f"Running test-only mode on dataset: {target_dataset}")
-        results = test_only_mode(config, device, target_dataset, expert_weights_dir)
-        print("\n" + "="*60)
-        print("TEST-ONLY MODE COMPLETED!")
-        print("="*60)
-        return results
-    
-    # If no phase specified, run both phases automatically
-    if phase is None:
-        print("No phase specified - running both Phase 1 (training classifier) and Phase 2 (MoE like train_moe2)")
-        run_phase_1 = True
-        run_phase_2 = True
-    elif phase == "1":
-        run_phase_1 = True
-        run_phase_2 = False
-    elif phase == "2":
-        run_phase_1 = False
-        run_phase_2 = True
-    
-    # Phase 1: Train dataset classifier
-    if run_phase_1:
-        print("\n" + "="*60)
-        print("STARTING PHASE 1: TRAINING DATASET CLASSIFIER")
-        print("="*60)
-        classifier = train_dataset_classifier(config, device, epoch, expert_weights_dir)
-        print("Phase 1 completed successfully!")
-        
-        if not run_phase_2:
-            print("\nTraining completed. Use --phase 2 to test the MoE model.")
-            return
-    
-    # Phase 2: Load classifier and run MoE like train_moe2.py
-    if run_phase_2:
-        print("\n" + "="*60)
-        print("STARTING PHASE 2: MoE TRAINING/TESTING LIKE TRAIN_MOE2.PY")
-        print("="*60)
-        
-        # Load classifier from moe_MOMO path
-        moe_save_dir = os.path.join(weight_dir, 'moe_MOMO')
-        classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
-        
-        if not os.path.exists(classifier_path):
-            raise FileNotFoundError(f"Classifier not found at {classifier_path}. Run Phase 1 first.")
-        
-        classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
-        classifier.load_state_dict(torch.load(classifier_path, map_location=device))
-        classifier.eval()
-        print(f"Loaded best classifier from: {classifier_path}")
-        
-        # Use specified dataset or default to CSAW
-        target_dataset = dataset if dataset else 'CSAW'
-        print(f"Running MoE training/testing on dataset: {target_dataset}")
-        
-        # Run MoE exactly like train_moe2.py
-        results = run_moe_like_train_moe2(config, classifier, device, target_dataset, expert_weights_dir, epoch)
-        
-        print("Phase 2 completed successfully!")
-        print(f"All files saved in: {os.path.join(expert_weights_dir, 'moe_MOMO')}")
-    
-    print("\n" + "="*60)
-    print("ALL PHASES COMPLETED SUCCESSFULLY!")
-    print("="*60)
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
-    parser.add_argument('--epoch', type=int, default=None, help='Number of epochs')
-    parser.add_argument('--dataset', type=str, default=None, help='Dataset name for testing (CSAW/DMID/DDSM)')
-    parser.add_argument('--weight_dir', type=str, default=None, help='Expert weights directory')
-    parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase (1: train only, 2: test only, None: both)')
-    parser.add_argument('--test', action='store_true', help='Test-only mode: load classifier and test MoE without training')
-    args = parser.parse_args()
-
-    main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase, args.test)
