@@ -153,14 +153,13 @@ class SimpleMoE(nn.Module):
         pass
     
     def forward(self, pixel_values, labels=None, return_routing=False):
-        """Forward pass with dataset classification routing - based on train_moe2.py structure."""
+        """Forward pass with dataset classification routing - EXACTLY like train_moe2.py"""
         batch_size = pixel_values.shape[0]
         
         # Get dataset predictions using our simple classifier
-        with torch.no_grad():
-            dataset_logits = self.classifier(pixel_values)
-            dataset_probs = F.softmax(dataset_logits, dim=1)
-            expert_choices = torch.argmax(dataset_probs, dim=1)
+        dataset_logits = self.classifier(pixel_values)
+        dataset_probs = F.softmax(dataset_logits, dim=1)
+        expert_choices = torch.argmax(dataset_probs, dim=1)
         
         # Update statistics (only during eval to avoid overhead)
         if not self.training:
@@ -181,9 +180,13 @@ class SimpleMoE(nn.Module):
             usage_pct = (self.routing_counts / self.total_routed * 100).cpu().numpy()
             print(f"Routing: CSAW={usage_pct[0]:.1f}%, DMID={usage_pct[1]:.1f}%, DDSM={usage_pct[2]:.1f}%")
         
-        # Get expert outputs for each group (same as train_moe2.py)
+        # Get expert outputs for each group (EXACTLY like train_moe2.py)
         batch_outputs = {}
-        total_detection_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        total_detection_loss = torch.tensor(0.0, device=self.device)
+        
+        # CRITICAL FIX: Don't use requires_grad=True on loss tensor
+        if labels is not None:
+            total_detection_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         for expert_idx, sample_indices in expert_groups.items():
             expert_pixel_values = pixel_values[sample_indices]
@@ -191,20 +194,27 @@ class SimpleMoE(nn.Module):
             if labels is not None:
                 expert_labels = [labels[i] for i in sample_indices]
             
-            # Get expert output (frozen expert, no gradients needed)
-            with torch.no_grad():
+            # Get expert output - CRITICAL: Allow gradients to flow during training
+            if self.training and labels is not None:
+                # During training, allow gradients to flow for loss computation
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-                expert_output = self._fix_expert_output_dimensions(expert_output)
+            else:
+                # During evaluation, no gradients needed
+                with torch.no_grad():
+                    expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
+            
+            expert_output = self._fix_expert_output_dimensions(expert_output)
             
             batch_outputs[expert_idx] = {
                 'output': expert_output,
                 'indices': sample_indices
             }
             
-            # Accumulate detection loss
+            # Accumulate detection loss EXACTLY like train_moe2.py
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 weight = len(sample_indices) / batch_size
-                total_detection_loss = total_detection_loss + expert_output.loss * weight
+                if labels is not None:
+                    total_detection_loss = total_detection_loss + expert_output.loss * weight
         
         # Reconstruct batch outputs in original order (same as train_moe2.py)
         if not batch_outputs:
@@ -236,7 +246,7 @@ class SimpleMoE(nn.Module):
             batch_logits[sample_indices] = expert_output.logits
             batch_pred_boxes[sample_indices] = expert_output.pred_boxes
             
-            if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
+            if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state') and expert_output.last_hidden_state is not None:
                 batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
         
         # Final safety check (same as train_moe2.py)
@@ -247,7 +257,7 @@ class SimpleMoE(nn.Module):
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
         
         combined_output = YolosObjectDetectionOutput(
-            loss=total_detection_loss,
+            loss=total_detection_loss if labels is not None else None,
             logits=batch_logits,
             pred_boxes=batch_pred_boxes,
             last_hidden_state=batch_last_hidden_state
@@ -520,7 +530,7 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
     return classifier
 
 def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, dataset_name=None):
-    """Test MoE with current classifier on specific dataset - like train_moe2.py evaluation."""
+    """Test MoE with current classifier on specific dataset - EXACTLY like train_moe2.py evaluation."""
     try:
         # Load expert models
         expert_models, _ = load_expert_models(weight_dir, device)
@@ -528,6 +538,9 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, 
         # Create MoE
         moe_model = SimpleMoE(expert_models, classifier, device).to(device)
         moe_model.eval()
+        
+        # Reset routing stats for clean evaluation
+        moe_model.reset_routing_stats()
         
         # Create test dataset - use specific dataset if provided
         MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
@@ -548,15 +561,15 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, 
             test_dataset = ConcatDataset(test_datasets)
             print(f"Testing MoE on combined datasets: {len(test_dataset)} samples")
         
-        # Quick evaluation with proper error handling
+        # Use EXACTLY the same evaluation setup as train_moe2.py
         training_args = TrainingArguments(
             output_dir='./temp_eval',
-            per_device_eval_batch_size=8,
+            per_device_eval_batch_size=16,  # Same as train_moe2.py
             dataloader_num_workers=0,
             remove_unused_columns=False,
             report_to=[],
-            fp16=False,
-            bf16=False,
+            fp16=False,  # Same as train_moe2.py
+            bf16=False,  # Same as train_moe2.py
             eval_do_concat_batches=False,
             disable_tqdm=False,
         )
@@ -666,34 +679,33 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
         print(f'Val: {len(val_dataset)} samples') 
         print(f'Test: {len(test_dataset)} samples')
         
-        # Training setup exactly like train_moe2.py - save to moe_MOMO directory
+        # Use EXACTLY the same training arguments as train_moe2.py
         output_dir = moe_save_dir
         
         date_str = datetime.datetime.now().strftime("%d%m%y")
         run_name = f"SimpleMoE_{dataset_name}_{date_str}"
         
-        # Use exact same training arguments as train_moe2.py with better error handling
         training_args = TrainingArguments(
             output_dir=output_dir,
             run_name=run_name,
-            num_train_epochs=epoch if epoch else 5,  # Reduced for faster testing
-            per_device_train_batch_size=8,   # Reduced batch size for stability
-            per_device_eval_batch_size=8,    # Reduced batch size for stability
-            learning_rate=1e-4,  # Lower learning rate for stability
-            weight_decay=0.0,
-            warmup_ratio=0.0,
-            lr_scheduler_type='constant',
+            num_train_epochs=epoch if epoch else 10,
+            per_device_train_batch_size=16,  # Same as train_moe2.py
+            per_device_eval_batch_size=16,   # Same as train_moe2.py
+            learning_rate=1e-3,  # Same as train_moe2.py
+            weight_decay=0.0,    # Same as train_moe2.py
+            warmup_ratio=0.0,    # Same as train_moe2.py
+            lr_scheduler_type='constant',  # Same as train_moe2.py
             eval_strategy="epoch",
             save_strategy="epoch",
             save_total_limit=1,
             logging_strategy="steps",
-            logging_steps=10,
+            logging_steps=50,
             report_to=[],
             load_best_model_at_end=True,
             metric_for_best_model='eval_map_50',
             greater_is_better=True,
-            fp16=False,
-            bf16=False,
+            fp16=False,  # Same as train_moe2.py
+            bf16=False,  # Same as train_moe2.py
             dataloader_num_workers=0,
             gradient_accumulation_steps=1,
             remove_unused_columns=False,
@@ -722,6 +734,9 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
         trained_moe_path = os.path.join(moe_save_dir, 'moe_trained.pth')
         torch.save(model.state_dict(), trained_moe_path)
         print(f"Trained MoE model saved to: {trained_moe_path}")
+        
+        # Reset routing stats before final evaluation
+        model.reset_routing_stats()
         
         print(f"\n=== Testing SimpleMoE on {dataset_name} test set ===")
         test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
