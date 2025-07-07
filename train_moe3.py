@@ -464,8 +464,8 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
             best_val_acc = val_acc
             best_epoch = epoch_idx + 1
             
-            # Save classifier in organized directory structure
-            moe_save_dir = os.path.join(weight_dir, 'moe_combined')
+            # Save classifier in moe_MOMO directory
+            moe_save_dir = os.path.join(weight_dir, 'moe_MOMO')
             os.makedirs(moe_save_dir, exist_ok=True)
             classifier_save_path = os.path.join(moe_save_dir, 'classifier_best.pth')
             torch.save(classifier.state_dict(), classifier_save_path)
@@ -477,8 +477,8 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
     
     print(f"\nBest classifier accuracy: {best_val_acc:.4f} (Epoch {best_epoch})")
     
-    # Load best classifier from new path
-    moe_save_dir = os.path.join(weight_dir, 'moe_combined')
+    # Load best classifier from moe_MOMO path
+    moe_save_dir = os.path.join(weight_dir, 'moe_MOMO')
     best_path = os.path.join(moe_save_dir, 'classifier_best.pth')
     classifier.load_state_dict(torch.load(best_path, map_location=device))
     classifier.eval()
@@ -486,7 +486,7 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
     return classifier
 
 def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, dataset_name=None):
-    """Test MoE with current classifier on specific dataset."""
+    """Test MoE with current classifier on specific dataset - like train_moe2.py evaluation."""
     try:
         # Load expert models
         expert_models, _ = load_expert_models(weight_dir, device)
@@ -545,35 +545,149 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, 
         stats = moe_model.get_routing_stats()
         print(f"Routing: CSAW={stats['CSAW']*100:.1f}%, DMID={stats['DMID']*100:.1f}%, DDSM={stats['DDSM']*100:.1f}%")
         
-        # Save MoE model for specific dataset tests
-        if dataset_name and epoch_num != "FINAL":
-            moe_save_dir = os.path.join(weight_dir, f'moe_{dataset_name}')
-            os.makedirs(moe_save_dir, exist_ok=True)
-            
-            # Save classifier
-            classifier_path = os.path.join(moe_save_dir, f'classifier_epoch{epoch_num}.pth')
-            torch.save(classifier.state_dict(), classifier_path)
-            
-            # Save MoE results
-            results_path = os.path.join(moe_save_dir, f'results_epoch{epoch_num}.json')
-            with open(results_path, 'w') as f:
-                # Convert numpy types to native Python types for JSON serialization
-                json_results = {}
-                for k, v in results.items():
-                    if isinstance(v, (np.integer, np.floating, np.ndarray)):
-                        json_results[k] = float(v)
-                    else:
-                        json_results[k] = v
-                json_results['routing_stats'] = stats
-                json.dump(json_results, f, indent=2)
-            
-            print(f"Saved MoE model and results to {moe_save_dir}")
-        
         return results
         
     except Exception as e:
         print(f"MoE test failed: {e}")
         return None
+
+def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_weights_dir, epoch=None):
+    """Run MoE training/testing exactly like train_moe2.py but with our simple classifier."""
+    print(f"\n=== Running MoE Training/Testing like train_moe2.py on {dataset_name} ===")
+    
+    # Load expert models
+    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
+    image_processor = expert_processors[0]
+    
+    # Create MoE model
+    model = SimpleMoE(expert_models, classifier, device).to(device)
+    
+    # Create datasets exactly like train_moe2.py
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    
+    print(f"Creating datasets for {dataset_name}...")
+    train_dataset = BreastCancerDataset(
+        split='train',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
+    
+    val_dataset = BreastCancerDataset(
+        split='val',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
+    
+    test_dataset = BreastCancerDataset(
+        split='test',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
+    
+    print(f'Train: {len(train_dataset)} samples')
+    print(f'Val: {len(val_dataset)} samples') 
+    print(f'Test: {len(test_dataset)} samples')
+    
+    # Training setup - save to moe_MOMO directory like train_moe2.py
+    output_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"SimpleMoE_{dataset_name}_{date_str}"
+    
+    training_args = TrainingArguments(
+        output_dir=output_dir,  # Save MoE weights to moe_MOMO
+        run_name=run_name,
+        num_train_epochs=epoch if epoch else 10,
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        learning_rate=1e-5,  # Lower learning rate since router is pre-trained
+        weight_decay=1e-4,
+        warmup_ratio=0.05,
+        lr_scheduler_type='cosine',
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=1,
+        logging_strategy="steps",
+        logging_steps=50,
+        report_to=[],
+        load_best_model_at_end=True,
+        metric_for_best_model='eval_map_50',
+        greater_is_better=True,
+        fp16=False,
+        dataloader_num_workers=0,
+        gradient_accumulation_steps=2,
+        remove_unused_columns=False,
+        save_safetensors=True,
+    )
+    
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    print(f"\n=== Training SimpleMoE on {dataset_name} ===")
+    trainer.train()
+    
+    print(f"\n=== Testing SimpleMoE on {dataset_name} test set ===")
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    
+    # Print test results exactly like train_moe2.py
+    print(f"\n=== Test Results on {dataset_name} ===")
+    for key, value in test_results.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+    
+    # Print final routing statistics
+    print(f"\n=== Final Routing Statistics on {dataset_name} ===")
+    final_stats = model.get_routing_stats()
+    for expert_name, usage in final_stats.items():
+        print(f"{expert_name}: {usage*100:.1f}%")
+    
+    # Save final results in moe_MOMO directory
+    moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
+    os.makedirs(moe_save_dir, exist_ok=True)
+    
+    # Save final classifier
+    final_classifier_path = os.path.join(moe_save_dir, 'classifier_final.pth')
+    torch.save(classifier.state_dict(), final_classifier_path)
+    
+    # Save final results
+    final_results_path = os.path.join(moe_save_dir, 'results_final.json')
+    with open(final_results_path, 'w') as f:
+        json_results = {}
+        for k, v in test_results.items():
+            if isinstance(v, (np.integer, np.floating, np.ndarray)):
+                json_results[k] = float(v)
+            else:
+                json_results[k] = v
+        json_results['routing_stats'] = final_stats
+        json.dump(json_results, f, indent=2)
+    
+    print(f"Final MoE model and results saved to {moe_save_dir}")
+    print(f"Classifier saved to: {final_classifier_path}")
+    print(f"Results saved to: {final_results_path}")
+    
+    return test_results
 
 def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
     """Main function - automatically runs both phases if not specified."""
@@ -593,7 +707,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
     
     # If no phase specified, run both phases automatically
     if phase is None:
-        print("No phase specified - running both Phase 1 (training) and Phase 2 (testing)")
+        print("No phase specified - running both Phase 1 (training classifier) and Phase 2 (MoE like train_moe2)")
         run_phase_1 = True
         run_phase_2 = True
     elif phase == "1":
@@ -612,17 +726,17 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
         print("Phase 1 completed successfully!")
         
         if not run_phase_2:
-            print("\nTraining completed. Use --phase 2 to test the model.")
+            print("\nTraining completed. Use --phase 2 to test the MoE model.")
             return
     
-    # Phase 2: Test with best classifier
+    # Phase 2: Load classifier and run MoE like train_moe2.py
     if run_phase_2:
         print("\n" + "="*60)
-        print("STARTING PHASE 2: TESTING WITH BEST CLASSIFIER")
+        print("STARTING PHASE 2: MoE TRAINING/TESTING LIKE TRAIN_MOE2.PY")
         print("="*60)
         
-        # Load classifier from organized path
-        moe_save_dir = os.path.join(expert_weights_dir, 'moe_combined')
+        # Load classifier from moe_MOMO path
+        moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
         classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
         
         if not os.path.exists(classifier_path):
@@ -633,32 +747,15 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
         classifier.eval()
         print(f"Loaded best classifier from: {classifier_path}")
         
-        # Test on specified dataset and save final results
-        results = test_moe_with_classifier(config, classifier, device, "FINAL", expert_weights_dir, dataset)
+        # Use specified dataset or default to CSAW
+        target_dataset = dataset if dataset else 'CSAW'
+        print(f"Running MoE training/testing on dataset: {target_dataset}")
         
-        # Save final MoE model for the tested dataset
-        if dataset and results:
-            moe_save_dir = os.path.join(expert_weights_dir, f'moe_{dataset}')
-            os.makedirs(moe_save_dir, exist_ok=True)
-            
-            # Save final classifier
-            final_classifier_path = os.path.join(moe_save_dir, 'classifier_final.pth')
-            torch.save(classifier.state_dict(), final_classifier_path)
-            
-            # Save final results
-            final_results_path = os.path.join(moe_save_dir, 'results_final.json')
-            with open(final_results_path, 'w') as f:
-                json_results = {}
-                for k, v in results.items():
-                    if isinstance(v, (np.integer, np.floating, np.ndarray)):
-                        json_results[k] = float(v)
-                    else:
-                        json_results[k] = v
-                json.dump(json_results, f, indent=2)
-            
-            print(f"Final MoE model saved to {moe_save_dir}")
+        # Run MoE exactly like train_moe2.py
+        results = run_moe_like_train_moe2(config, classifier, device, target_dataset, expert_weights_dir, epoch)
         
         print("Phase 2 completed successfully!")
+        print(f"All files saved in: {os.path.join(expert_weights_dir, 'moe_MOMO')}")
     
     print("\n" + "="*60)
     print("ALL PHASES COMPLETED SUCCESSFULLY!")
