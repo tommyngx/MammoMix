@@ -350,7 +350,7 @@ def run_one_testing_mode(expert_model, test_dataset, moe_model_path, weight_dir,
                     image_processor
                 ).to(device)
                 
-                # Debug: Check raw vs validated output
+                # Debug: Check raw vs validated output 
                 with torch.no_grad():
                     # Raw MoE output
                     raw_moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
