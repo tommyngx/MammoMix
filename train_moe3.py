@@ -442,4 +442,3 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None, tes
         print("\n" + "="*60)
         print("TEST-ONLY MODE COMPLETED!")
         print("="*60)
-        return results
