@@ -84,27 +84,22 @@ class ImageRouterMoE(nn.Module):
         NO COMBINATION - just return the chosen expert's output directly.
         """
         batch_size = pixel_values.shape[0]
-        print(f"[DEBUG] Forward: batch_size={batch_size}, labels={'None' if labels is None else 'Present'}")
         
         # Get routing probabilities
         routing_logits = self.router(pixel_values)  # Shape: (batch_size, 3)
         routing_probs = F.softmax(routing_logits, dim=1)
         expert_choices = torch.argmax(routing_probs, dim=1)  # Shape: (batch_size,)
-        print(f"[DEBUG] Routing choices: {expert_choices}")
         
         # For training: compute routing loss to learn better routing
         routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         if labels is not None:
-            print(f"[DEBUG] Computing routing loss with {len(self.experts)} experts")
             # Get outputs from all experts to compare losses (for routing learning)
             expert_losses = []
             for expert_idx in range(len(self.experts)):
                 with torch.no_grad():
                     expert_output = self.experts[expert_idx](pixel_values, labels=labels)
-                    print(f"[DEBUG] Expert {expert_idx} original pred_boxes shape: {expert_output.pred_boxes.shape}")
                     # CRITICAL: Fix dimensions immediately after getting expert output
                     expert_output = self._fix_expert_output_dimensions(expert_output)
-                    print(f"[DEBUG] Expert {expert_idx} fixed pred_boxes shape: {expert_output.pred_boxes.shape}")
                     if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                         expert_losses.append(expert_output.loss)
             
@@ -115,7 +110,6 @@ class ImageRouterMoE(nn.Module):
                 
                 # Routing loss: encourage router to choose the best expert
                 routing_loss = F.cross_entropy(routing_logits, best_expert_indices)
-                print(f"[DEBUG] Routing loss computed: {routing_loss.item()}")
         
         # For batch processing, we need to group by expert choice
         expert_groups = {}
@@ -125,8 +119,6 @@ class ImageRouterMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        print(f"[DEBUG] Expert groups: {expert_groups}")
-        
         # Get the first expert output to determine correct tensor shapes and dtypes
         first_expert_idx = list(expert_groups.keys())[0]
         first_sample_indices = expert_groups[first_expert_idx]
@@ -135,19 +127,14 @@ class ImageRouterMoE(nn.Module):
         if labels is not None:
             first_expert_labels = [labels[i] for i in first_sample_indices]
         
-        print(f"[DEBUG] Processing first expert {first_expert_idx} with {len(first_sample_indices)} samples")
-        
         with torch.no_grad():
             reference_output = self.experts[first_expert_idx](first_expert_pixel_values, labels=first_expert_labels)
-            print(f"[DEBUG] Reference output original pred_boxes shape: {reference_output.pred_boxes.shape}")
             # CRITICAL: Fix dimensions immediately
             reference_output = self._fix_expert_output_dimensions(reference_output)
-            print(f"[DEBUG] Reference output fixed pred_boxes shape: {reference_output.pred_boxes.shape}")
         
         # Initialize output tensors with correct dtypes and shapes from reference
         num_queries = reference_output.logits.shape[1]
         num_classes = reference_output.logits.shape[2]
-        print(f"[DEBUG] Initializing batch tensors: queries={num_queries}, classes={num_classes}")
         
         batch_logits = torch.zeros(batch_size, num_queries, num_classes, 
                                  device=pixel_values.device, dtype=reference_output.logits.dtype)
@@ -156,13 +143,9 @@ class ImageRouterMoE(nn.Module):
         batch_loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=True)
         batch_last_hidden_state = None
         
-        print(f"[DEBUG] Initialized batch_pred_boxes shape: {batch_pred_boxes.shape}")
-        
         # Use the reference output for the first group
         batch_logits[first_sample_indices] = reference_output.logits
         batch_pred_boxes[first_sample_indices] = reference_output.pred_boxes  # Already fixed to 4D above
-        
-        print(f"[DEBUG] After first group assignment, batch_pred_boxes shape: {batch_pred_boxes.shape}")
         
         if hasattr(reference_output, 'loss') and reference_output.loss is not None:
             batch_loss = batch_loss + reference_output.loss * len(first_sample_indices) / batch_size
@@ -175,10 +158,7 @@ class ImageRouterMoE(nn.Module):
         
         # Process remaining expert groups (skip the first one we already processed)
         remaining_groups = {k: v for k, v in expert_groups.items() if k != first_expert_idx}
-        print(f"[DEBUG] Processing {len(remaining_groups)} remaining expert groups")
-        
         for expert_idx, sample_indices in remaining_groups.items():
-            print(f"[DEBUG] Processing expert {expert_idx} with samples {sample_indices}")
             # Get inputs for this expert
             expert_pixel_values = pixel_values[sample_indices]
             
@@ -190,16 +170,12 @@ class ImageRouterMoE(nn.Module):
             # Get expert output
             with torch.no_grad():
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-                print(f"[DEBUG] Expert {expert_idx} original pred_boxes shape: {expert_output.pred_boxes.shape}")
                 # CRITICAL: Fix dimensions immediately after getting expert output
                 expert_output = self._fix_expert_output_dimensions(expert_output)
-                print(f"[DEBUG] Expert {expert_idx} fixed pred_boxes shape: {expert_output.pred_boxes.shape}")
             
             # Place expert outputs back into batch positions
             batch_logits[sample_indices] = expert_output.logits
             batch_pred_boxes[sample_indices] = expert_output.pred_boxes  # Now guaranteed to be 4D
-            
-            print(f"[DEBUG] After expert {expert_idx} assignment, batch_pred_boxes shape: {batch_pred_boxes.shape}")
             
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 batch_loss = batch_loss + expert_output.loss * len(sample_indices) / batch_size
@@ -211,15 +187,11 @@ class ImageRouterMoE(nn.Module):
         if labels is not None and routing_loss.item() > 0:
             batch_loss = batch_loss + 0.1 * routing_loss
         
-        print(f"[DEBUG] Before safety checks, batch_pred_boxes shape: {batch_pred_boxes.shape}")
-        
         # Final safety check - ensure ALL outputs have exactly 4 dimensions
         assert batch_pred_boxes.shape[-1] == 4, f"FINAL CHECK FAILED: pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
         
         # Additional safety: force contiguous and ensure exact 4D for all outputs
         batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
-        
-        print(f"[DEBUG] After contiguous operation, batch_pred_boxes shape: {batch_pred_boxes.shape}")
         
         # Create output exactly like a single YOLOS model
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
@@ -230,8 +202,6 @@ class ImageRouterMoE(nn.Module):
             pred_boxes=batch_pred_boxes,  # Now guaranteed to be exactly 4D
             last_hidden_state=batch_last_hidden_state
         )
-        
-        print(f"[DEBUG] Created combined_output with pred_boxes shape: {combined_output.pred_boxes.shape}")
         
         # CRITICAL: Final check before returning - ensure pred_boxes is exactly 4D
         if combined_output.pred_boxes.shape[-1] != 4:
@@ -262,7 +232,6 @@ class ImageRouterMoE(nn.Module):
         
         # Final verification
         final_shape = combined_output.pred_boxes.shape
-        print(f"[DEBUG] FINAL OUTPUT pred_boxes shape: {final_shape}")
         assert final_shape[-1] == 4, f"CRITICAL FAILURE: pred_boxes still has {final_shape[-1]} dims after all safety checks!"
         
         if return_routing:
@@ -275,14 +244,10 @@ class ImageRouterMoE(nn.Module):
         Centralized method to fix expert output dimensions.
         Ensures pred_boxes always has exactly 4 dimensions.
         """
-        original_shape = expert_output.pred_boxes.shape
-        print(f"[DEBUG] _fix_expert_output_dimensions: input shape {original_shape}")
-        
         if expert_output.pred_boxes.shape[-1] != 4:
             print(f"FIXING: Expert pred_boxes has {expert_output.pred_boxes.shape[-1]} dims, fixing to 4")
             # Create a new output object with fixed dimensions
             fixed_pred_boxes = expert_output.pred_boxes[..., :4].contiguous()
-            print(f"[DEBUG] Fixed pred_boxes shape: {fixed_pred_boxes.shape}")
             
             fixed_output = type(expert_output)(
                 loss=expert_output.loss,
@@ -290,10 +255,8 @@ class ImageRouterMoE(nn.Module):
                 pred_boxes=fixed_pred_boxes,
                 last_hidden_state=expert_output.last_hidden_state if hasattr(expert_output, 'last_hidden_state') else None
             )
-            print(f"[DEBUG] _fix_expert_output_dimensions: output shape {fixed_output.pred_boxes.shape}")
             return fixed_output
         
-        print(f"[DEBUG] _fix_expert_output_dimensions: no fix needed, shape is {original_shape}")
         return expert_output
 
 def load_expert_models(weight_dir, device):
