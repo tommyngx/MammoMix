@@ -1049,7 +1049,7 @@ def simple_test_comparison(config, device, dataset_name, expert_weights_dir):
     print(f"\n=== SIMPLE TEST: SimpleMoE vs Individual Expert on {dataset_name} ===")
     
     # Load expert models
-    expert_models, expert_processors = load_expeert_models(expert_weights_dir, device)
+    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     image_processor = expert_processors[0]
     
     # Load classifier
