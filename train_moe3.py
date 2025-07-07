@@ -41,59 +41,64 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-class DataRouter(nn.Module):
+class SimpleDatasetClassifier(nn.Module):
     """
-    Standalone router network that learns to classify which expert is best for each image.
-    Phase 1: Train this separately to learn data routing patterns.
+    Simple CNN to classify which dataset an image belongs to.
+    Much simpler than the complex router approach.
     """
-    def __init__(self, num_experts=3, device='cuda'):
+    def __init__(self, num_classes=3, device='cuda'):
         super().__init__()
-        self.num_experts = num_experts
+        self.num_classes = num_classes
         self.device = device
-        self.expert_names = ['CSAW', 'DMID', 'DDSM']
+        self.class_names = ['CSAW', 'DMID', 'DDSM']
         
-        # Enhanced router architecture for better feature learning
-        self.feature_extractor = nn.Sequential(
-            # Initial feature extraction
-            nn.Conv2d(3, 64, 7, stride=4, padding=3),  # 640->160
+        # Simple CNN for dataset classification
+        self.features = nn.Sequential(
+            # First block
+            nn.Conv2d(3, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),  # 640 -> 320
+            
+            # Second block
+            nn.Conv2d(32, 64, 3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.Conv2d(64, 128, 5, stride=2, padding=2),  # 160->80
+            nn.MaxPool2d(2),  # 320 -> 160
+            
+            # Third block
+            nn.Conv2d(64, 128, 3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.Conv2d(128, 256, 3, stride=2, padding=1),  # 80->40
+            nn.MaxPool2d(2),  # 160 -> 80
+            
+            # Fourth block
+            nn.Conv2d(128, 256, 3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d(8),  # 40->8x8 = 64 features per channel
-            nn.Flatten(),  # 256*64 = 16384 features
+            nn.AdaptiveAvgPool2d(4),  # 80 -> 4x4
         )
         
         self.classifier = nn.Sequential(
-            nn.Linear(16384, 1024),
+            nn.Flatten(),
+            nn.Linear(256 * 4 * 4, 512),
             nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(1024, 256),
+            nn.Dropout(0.5),
+            nn.Linear(512, 128),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(256, 64),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, num_experts),
+            nn.Linear(128, num_classes)
         )
         
-        # Initialize weights properly
+        # Initialize weights
         self._initialize_weights()
         
-        # Track routing performance
-        self.expert_performance = {}
-        self.routing_accuracy = 0.0
-        
-        print(f"DataRouter initialized with {num_experts} experts")
+        print(f"SimpleDatasetClassifier initialized for {num_classes} datasets")
         total_params = sum(p.numel() for p in self.parameters())
-        print(f'Router parameters: {total_params / 1e6:.2f}M')
+        print(f'Total parameters: {total_params / 1e6:.2f}M')
     
     def _initialize_weights(self):
-        """Proper weight initialization."""
+        """Initialize weights properly."""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -106,77 +111,54 @@ class DataRouter(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.zeros_(m.bias)
     
-    def forward(self, pixel_values, expert_labels=None):
-        """
-        Forward pass for router training.
-        expert_labels: ground truth expert indices for supervised learning
-        """
-        features = self.feature_extractor(pixel_values)
+    def forward(self, x):
+        """Forward pass."""
+        features = self.features(x)
         logits = self.classifier(features)
-        
-        loss = None
-        if expert_labels is not None:
-            # Cross-entropy loss for expert classification
-            loss = F.cross_entropy(logits, expert_labels)
-        
-        return {
-            'logits': logits,
-            'loss': loss,
-            'predictions': torch.argmax(logits, dim=1)
-        }
+        return logits
 
-class ImageRouterMoE(nn.Module):
+class SimpleMoE(nn.Module):
     """
-    MoE with pre-trained router from Phase 1.
-    Phase 2: Use the trained router and fine-tune the entire system.
+    Simple MoE that uses the trained dataset classifier for routing.
+    Much cleaner than the complex router approach.
     """
-    def __init__(self, expert_models, pretrained_router, device):
+    def __init__(self, expert_models, dataset_classifier, device):
         super().__init__()
         self.experts = nn.ModuleList(expert_models)
+        self.classifier = dataset_classifier
         self.device = device
         self.expert_names = ['CSAW', 'DMID', 'DDSM']
         
-        # Use pretrained router
-        self.router = pretrained_router
-        
-        # Freeze expert models
+        # Freeze everything except classifier
         for expert in self.experts:
             for param in expert.parameters():
                 param.requires_grad = False
         
-        # Fine-tune router (optional)
-        self.freeze_router = False  # Set to True to freeze router completely
-        if self.freeze_router:
-            for param in self.router.parameters():
-                param.requires_grad = False
-        
-        # Statistics tracking
+        # Statistics
         self.routing_counts = torch.zeros(3, device=device)
         self.total_routed = 0
         
-        print(f"MoE initialized with pretrained router")
+        print(f"SimpleMoE initialized with dataset classifier routing")
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f'Total parameters: {total_params / 1e6:.2f}M')
         print(f'Trainable parameters: {trainable_params / 1e6:.2f}M')
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        """Enable gradient checkpointing for compatibility."""
         pass
     
     def gradient_checkpointing_disable(self):
-        """Disable gradient checkpointing for compatibility."""
         pass
     
     def forward(self, pixel_values, labels=None, return_routing=False):
-        """Forward pass with pretrained routing."""
+        """Forward pass with dataset classification routing."""
         batch_size = pixel_values.shape[0]
         
-        # Get routing decisions from pretrained router
-        router_output = self.router(pixel_values)
-        routing_logits = router_output['logits']
-        routing_probs = F.softmax(routing_logits, dim=1)
-        expert_choices = torch.argmax(routing_probs, dim=1)
+        # Get dataset predictions
+        with torch.no_grad():
+            dataset_logits = self.classifier(pixel_values)
+            dataset_probs = F.softmax(dataset_logits, dim=1)
+            expert_choices = torch.argmax(dataset_probs, dim=1)
         
         # Update statistics
         if not self.training:
@@ -184,7 +166,7 @@ class ImageRouterMoE(nn.Module):
                 self.routing_counts[choice] += 1
             self.total_routed += batch_size
         
-        # Group samples by expert choice
+        # Group by expert
         expert_groups = {}
         for i in range(batch_size):
             expert_idx = expert_choices[i].item()
@@ -192,14 +174,14 @@ class ImageRouterMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        # Print routing distribution periodically
-        if not self.training and self.total_routed % 500 == 0:
+        # Print routing stats
+        if not self.training and self.total_routed % 100 == 0:
             usage_pct = (self.routing_counts / self.total_routed * 100).cpu().numpy()
             print(f"Routing: CSAW={usage_pct[0]:.1f}%, DMID={usage_pct[1]:.1f}%, DDSM={usage_pct[2]:.1f}%")
         
         # Get expert outputs
         batch_outputs = {}
-        total_detection_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         for expert_idx, sample_indices in expert_groups.items():
             expert_pixel_values = pixel_values[sample_indices]
@@ -207,25 +189,19 @@ class ImageRouterMoE(nn.Module):
             if labels is not None:
                 expert_labels = [labels[i] for i in sample_indices]
             
-            # Get expert output - FIXED: Don't disable gradients completely for router fine-tuning
-            if self.freeze_router:
-                with torch.no_grad():
-                    expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-                    expert_output = self._fix_expert_output_dimensions(expert_output)
-            else:
-                # Allow gradients for router fine-tuning
+            # Get expert output
+            with torch.no_grad():
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-                expert_output = self._fix_expert_output_dimensions(expert_output)
             
             batch_outputs[expert_idx] = {
                 'output': expert_output,
                 'indices': sample_indices
             }
             
-            # Accumulate detection loss
+            # Accumulate loss
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 weight = len(sample_indices) / batch_size
-                total_detection_loss = total_detection_loss + expert_output.loss * weight
+                total_loss = total_loss + expert_output.loss * weight
         
         # Reconstruct batch outputs
         if not batch_outputs:
@@ -242,12 +218,6 @@ class ImageRouterMoE(nn.Module):
                                  device=pixel_values.device, dtype=reference_output.logits.dtype)
         batch_pred_boxes = torch.zeros(batch_size, num_queries, 4, 
                                      device=pixel_values.device, dtype=reference_output.pred_boxes.dtype)
-        batch_last_hidden_state = None
-        
-        if hasattr(reference_output, 'last_hidden_state') and reference_output.last_hidden_state is not None:
-            batch_last_hidden_state = torch.zeros(batch_size, reference_output.last_hidden_state.shape[1], 
-                                                 reference_output.last_hidden_state.shape[2], 
-                                                 device=pixel_values.device, dtype=reference_output.last_hidden_state.dtype)
         
         # Fill batch tensors
         for expert_idx, group_data in batch_outputs.items():
@@ -255,21 +225,7 @@ class ImageRouterMoE(nn.Module):
             sample_indices = group_data['indices']
             
             batch_logits[sample_indices] = expert_output.logits
-            batch_pred_boxes[sample_indices] = expert_output.pred_boxes
-            
-            if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
-                batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
-        
-        # Optional router fine-tuning loss
-        router_loss = torch.tensor(0.0, device=self.device)
-        if not self.freeze_router and labels is not None and self.training:
-            # Small router fine-tuning loss
-            router_loss = 0.1 * router_output.get('loss', torch.tensor(0.0, device=self.device))
-        
-        total_loss = total_detection_loss + router_loss
-        
-        # Safety check
-        batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
+            batch_pred_boxes[sample_indices] = expert_output.pred_boxes[..., :4]
         
         # Create output
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
@@ -278,12 +234,12 @@ class ImageRouterMoE(nn.Module):
             loss=total_loss,
             logits=batch_logits,
             pred_boxes=batch_pred_boxes,
-            last_hidden_state=batch_last_hidden_state
+            last_hidden_state=None
         )
         
         if return_routing:
             routing_info = {
-                'probs': routing_probs,
+                'probs': dataset_probs,
                 'choices': expert_choices,
                 'groups': expert_groups,
                 'stats': self.get_routing_stats()
@@ -291,19 +247,6 @@ class ImageRouterMoE(nn.Module):
             return combined_output, routing_info
         else:
             return combined_output
-    
-    def _fix_expert_output_dimensions(self, expert_output):
-        """Fix expert output dimensions."""
-        if expert_output.pred_boxes.shape[-1] != 4:
-            fixed_pred_boxes = expert_output.pred_boxes[..., :4].contiguous()
-            fixed_output = type(expert_output)(
-                loss=expert_output.loss,
-                logits=expert_output.logits,
-                pred_boxes=fixed_pred_boxes,
-                last_hidden_state=expert_output.last_hidden_state if hasattr(expert_output, 'last_hidden_state') else None
-            )
-            return fixed_output
-        return expert_output
     
     def get_routing_stats(self):
         """Get routing statistics."""
@@ -317,7 +260,7 @@ class ImageRouterMoE(nn.Module):
         return stats
 
 def load_expert_models(weight_dir, device):
-    """Load the 3 expert models."""
+    """Load expert models."""
     expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM']
     expert_paths = [os.path.join(weight_dir, name) for name in expert_names]
     
@@ -340,238 +283,295 @@ def load_expert_models(weight_dir, device):
     
     return models, processors
 
-def evaluate_experts_on_data(expert_models, dataset, image_processor, device, sample_size=100):
-    """
-    Evaluate all experts on a sample of data to create routing labels.
-    Returns expert performance for each sample.
-    """
-    print(f"Evaluating experts on {min(sample_size, len(dataset))} samples...")
-    
-    # Sample subset for evaluation
-    if len(dataset) > sample_size:
-        indices = torch.randperm(len(dataset))[:sample_size]
-        eval_dataset = Subset(dataset, indices)
-    else:
-        eval_dataset = dataset
-    
-    dataloader = DataLoader(eval_dataset, batch_size=8, shuffle=False, collate_fn=collate_fn)
-    
-    expert_performances = []  # List of (sample_idx, expert_losses)
-    
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(dataloader, desc="Evaluating experts")):
-            pixel_values = batch['pixel_values'].to(device)
-            labels = batch['labels']
-            
-            # FIXED: Move labels to device properly
-            # Convert labels to proper format and move to device
-            if labels is not None:
-                processed_labels = []
-                for label in labels:
-                    if isinstance(label, dict):
-                        # Move each tensor in the label dict to device
-                        processed_label = {}
-                        for key, value in label.items():
-                            if torch.is_tensor(value):
-                                processed_label[key] = value.to(device)
-                            else:
-                                processed_label[key] = value
-                        processed_labels.append(processed_label)
-                    elif torch.is_tensor(label):
-                        processed_labels.append(label.to(device))
-                    else:
-                        processed_labels.append(label)
-                labels = processed_labels
-            
-            batch_losses = []
-            for expert_idx, expert in enumerate(expert_models):
-                try:
-                    output = expert(pixel_values, labels=labels)
-                    if hasattr(output, 'loss') and output.loss is not None:
-                        batch_losses.append(output.loss.item())
-                    else:
-                        batch_losses.append(float('inf'))
-                except Exception as e:
-                    print(f"Expert {expert_idx} failed on batch {batch_idx}: {e}")
-                    batch_losses.append(float('inf'))
-            
-            # Store best expert for each sample in batch
-            for i in range(len(labels) if labels else pixel_values.shape[0]):
-                sample_losses = [loss for loss in batch_losses]
-                best_expert = np.argmin(sample_losses)
-                expert_performances.append({
-                    'sample_idx': batch_idx * 8 + i,
-                    'expert_losses': sample_losses,
-                    'best_expert': best_expert
-                })
-    
-    return expert_performances
-
-def create_routing_dataset_with_labels(config, image_processor, split, dataset_name, expert_performances):
-    """Create dataset with expert routing labels."""
+def create_dataset_with_labels(config, image_processor, dataset_name, split, epoch=None):
+    """Create dataset with dataset labels (0=CSAW, 1=DMID, 2=DDSM)."""
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
     
-    base_dataset = BreastCancerDataset(
+    dataset = BreastCancerDataset(
         split=split,
         splits_dir=SPLITS_DIR,
         dataset_name=dataset_name,
         image_processor=image_processor,
         model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
     )
     
-    # Create routing labels
-    routing_labels = []
-    for i in range(len(base_dataset)):
-        if i < len(expert_performances):
-            routing_labels.append(expert_performances[i]['best_expert'])
-        else:
-            # Default to expert 0 for unseen samples
-            routing_labels.append(0)
+    # Create simple dataset labels
+    dataset_map = {'CSAW': 0, 'DMID': 1, 'DDSM': 2}
+    dataset_label = dataset_map[dataset_name]
     
-    return base_dataset, routing_labels
+    # Create labels for all samples
+    labels = [dataset_label] * len(dataset)
+    
+    return dataset, labels
 
-def create_combined_dataset(config, image_processor, split, epoch=None):
-    """Create combined dataset from all 3 datasets (CSAW, DMID, DDSM)."""
-    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
-    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
-    
-    datasets = []
-    dataset_names = ['CSAW', 'DMID', 'DDSM']
-    
-    for dataset_name in dataset_names:
-        try:
-            dataset = BreastCancerDataset(
-                split=split,
-                splits_dir=SPLITS_DIR,
-                dataset_name=dataset_name,
-                image_processor=image_processor,
-                model_type=get_model_type(MODEL_NAME),
-                dataset_epoch=epoch
-            )
-            datasets.append(dataset)
-            print(f"{dataset_name} {split}: {len(dataset)} samples")
-        except Exception as e:
-            print(f"Warning: Could not load {dataset_name} {split}: {e}")
-    
-    # Combine all datasets
-    from torch.utils.data import ConcatDataset
-    combined_dataset = ConcatDataset(datasets)
-    print(f"Combined {split} dataset: {len(combined_dataset)} samples from {len(datasets)} datasets")
-    
-    return combined_dataset
-
-def evaluate_moe_with_router(router, expert_models, test_dataset, image_processor, device, epoch_num):
-    """Evaluate MoE with current router on test dataset."""
-    print(f"\n=== Evaluating MoE with Router (Epoch {epoch_num}) ===")
-    
-    # Create MoE model with current router
-    model = ImageRouterMoE(expert_models, router, device).to(device)
-    model.eval()
-    
-    # Setup evaluation
-    date_str = datetime.datetime.now().strftime("%d%m%y")
-    run_name = f"MoE3_Eval_Epoch{epoch_num}_{date_str}"
-    
-    training_args = TrainingArguments(
-        output_dir='./temp_eval_output',
-        run_name=run_name,
-        per_device_eval_batch_size=8,
-        eval_do_concat_batches=False,
-        disable_tqdm=False,
-        logging_dir="./logs",
-        eval_strategy="epoch",
-        save_strategy="no",  # Don't save during evaluation
-        logging_strategy="epoch",
-        report_to=[],  # Disable external loggers
-        fp16=False,
-        dataloader_num_workers=0,
-        remove_unused_columns=False,
-    )
-    
-    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
-    
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        eval_dataset=test_dataset,
-        processing_class=image_processor,
-        data_collator=collate_fn,
-        compute_metrics=eval_compute_metrics_fn,
-    )
-    
-    # Evaluate
-    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-    
-    # Print results
-    print(f"Epoch {epoch_num} Test Results:")
-    for key, value in test_results.items():
-        if isinstance(value, float):
-            print(f"  {key}: {value:.4f}")
-        else:
-            print(f"  {key}: {value}")
-    
-    # Print routing statistics
-    final_stats = model.get_routing_stats()
-    print(f"Routing distribution:")
-    for expert_name, usage in final_stats.items():
-        print(f"  {expert_name}: {usage*100:.1f}%")
-    
-    return test_results, final_stats
-
-def train_phase1_router(config, expert_models, device, epoch=None, weight_dir=None):
+def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
     """
-    Phase 1: Train router on COMBINED dataset from all 3 sources.
-    Evaluate MoE after each epoch.
+    Train simple CNN to classify datasets.
+    Much simpler than the complex expert evaluation approach.
     """
     print("\n" + "="*50)
-    print("PHASE 1: Training Router on Combined Dataset")
+    print("PHASE 1: Training Simple Dataset Classifier")
     print("="*50)
     
-    # Load datasets
-    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
-    
-    # Get image processor
     image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
     
-    # Create COMBINED datasets from all 3 sources
-    print("Creating combined training dataset...")
-    train_dataset = create_combined_dataset(config, image_processor, 'train', epoch)
+    # Create datasets with simple labels
+    all_train_datasets = []
+    all_train_labels = []
+    all_val_datasets = []
+    all_val_labels = []
     
-    print("Creating combined validation dataset...")
-    val_dataset = create_combined_dataset(config, image_processor, 'val', epoch)
+    for dataset_name in ['CSAW', 'DMID', 'DDSM']:
+        print(f"Loading {dataset_name} data...")
+        
+        # Train data
+        train_dataset, train_labels = create_dataset_with_labels(
+            config, image_processor, dataset_name, 'train', epoch
+        )
+        all_train_datasets.append(train_dataset)
+        all_train_labels.extend(train_labels)
+        print(f"{dataset_name} train: {len(train_dataset)} samples")
+        
+        # Val data
+        val_dataset, val_labels = create_dataset_with_labels(
+            config, image_processor, dataset_name, 'val', epoch
+        )
+        all_val_datasets.append(val_dataset)
+        all_val_labels.extend(val_labels)
+        print(f"{dataset_name} val: {len(val_dataset)} samples")
     
-    print("Creating combined test dataset...")
-    test_dataset = create_combined_dataset(config, image_processor, 'test', epoch)
+    # Combine datasets
+    from torch.utils.data import ConcatDataset
+    combined_train_dataset = ConcatDataset(all_train_datasets)
+    combined_val_dataset = ConcatDataset(all_val_datasets)
     
-    # Evaluate experts to create routing labels
-    print("Creating routing labels for combined training data...")
-    train_performances = evaluate_experts_on_data(expert_models, train_dataset, image_processor, device, sample_size=1000)
+    print(f"Combined train: {len(combined_train_dataset)} samples")
+    print(f"Combined val: {len(combined_val_dataset)} samples")
     
-    print("Creating routing labels for combined validation data...")
-    val_performances = evaluate_experts_on_data(expert_models, val_dataset, image_processor, device, sample_size=500)
+    # Count distribution
+    train_counts = np.bincount(all_train_labels, minlength=3)
+    print(f"Train distribution: CSAW={train_counts[0]}, DMID={train_counts[1]}, DDSM={train_counts[2]}")
     
-    # Create routing labels
-    train_routing_labels = []
-    for i in range(len(train_dataset)):
-        if i < len(train_performances):
-            train_routing_labels.append(train_performances[i]['best_expert'])
-        else:
-            train_routing_labels.append(0)  # Default
+    # Create classifier
+    classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
     
-    val_routing_labels = []
-    for i in range(len(val_dataset)):
-        if i < len(val_performances):
-            val_routing_labels.append(val_performances[i]['best_expert'])
-        else:
-            val_routing_labels.append(0)  # Default
+    # Training setup
+    optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-4, weight_decay=1e-4)
+    criterion = nn.CrossEntropyLoss()
+    num_epochs = epoch if epoch else 10
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     
-    print(f"Router training data: {len(train_dataset)} samples")
-    print(f"Router validation data: {len(val_dataset)} samples")
-    print(f"Router test data: {len(test_dataset)} samples")
+    best_val_acc = 0.0
+    best_epoch = 0
     
-    # Analyze expert distribution
+    # Custom dataset class for labels
+    class LabeledDataset(Dataset):
+        def __init__(self, base_dataset, labels):
+            self.base_dataset = base_dataset
+            self.labels = labels
+        
+        def __len__(self):
+            return len(self.base_dataset)
+        
+        def __getitem__(self, idx):
+            item = self.base_dataset[idx]
+            item['dataset_label'] = self.labels[idx]
+            return item
+    
+    # Create labeled datasets
+    train_labeled = LabeledDataset(combined_train_dataset, all_train_labels)
+    val_labeled = LabeledDataset(combined_val_dataset, all_val_labels)
+    
+    # Training loop
+    for epoch_idx in range(num_epochs):
+        print(f"\nEpoch {epoch_idx + 1}/{num_epochs}")
+        
+        # Training
+        classifier.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        
+        train_loader = DataLoader(train_labeled, batch_size=16, shuffle=True, collate_fn=collate_fn)
+        
+        for batch in tqdm(train_loader, desc="Training"):
+            pixel_values = batch['pixel_values'].to(device)
+            dataset_labels = torch.tensor(batch['dataset_label'], device=device)
+            
+            optimizer.zero_grad()
+            outputs = classifier(pixel_values)
+            loss = criterion(outputs, dataset_labels)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            predictions = torch.argmax(outputs, dim=1)
+            train_correct += (predictions == dataset_labels).sum().item()
+            train_total += dataset_labels.size(0)
+        
+        scheduler.step()
+        
+        # Validation
+        classifier.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        
+        val_loader = DataLoader(val_labeled, batch_size=16, shuffle=False, collate_fn=collate_fn)
+        
+        with torch.no_grad():
+            for batch in tqdm(val_loader, desc="Validation"):
+                pixel_values = batch['pixel_values'].to(device)
+                dataset_labels = torch.tensor(batch['dataset_label'], device=device)
+                
+                outputs = classifier(pixel_values)
+                loss = criterion(outputs, dataset_labels)
+                
+                val_loss += loss.item()
+                predictions = torch.argmax(outputs, dim=1)
+                val_correct += (predictions == dataset_labels).sum().item()
+                val_total += dataset_labels.size(0)
+        
+        # Calculate accuracies
+        train_acc = train_correct / train_total
+        val_acc = val_correct / val_total
+        
+        print(f"Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.4f}")
+        print(f"Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.4f}")
+        
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_epoch = epoch_idx + 1
+            
+            # Save classifier
+            classifier_save_path = os.path.join(weight_dir, 'dataset_classifier_best')
+            os.makedirs(classifier_save_path, exist_ok=True)
+            torch.save(classifier.state_dict(), os.path.join(classifier_save_path, 'classifier.pth'))
+            print(f"Best classifier saved (acc: {val_acc:.4f})")
+        
+        # Test MoE after each epoch
+        print(f"\n=== Testing MoE with Current Classifier (Epoch {epoch_idx + 1}) ===")
+        test_moe_with_classifier(config, classifier, device, epoch_idx + 1, weight_dir)
+    
+    print(f"\nBest classifier accuracy: {best_val_acc:.4f} (Epoch {best_epoch})")
+    
+    # Load best classifier
+    best_path = os.path.join(weight_dir, 'dataset_classifier_best', 'classifier.pth')
+    classifier.load_state_dict(torch.load(best_path, map_location=device))
+    classifier.eval()
+    
+    return classifier
+
+def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir):
+    """Test MoE with current classifier."""
+    try:
+        # Load expert models
+        expert_models, _ = load_expert_models(weight_dir, device)
+        
+        # Create MoE
+        moe_model = SimpleMoE(expert_models, classifier, device).to(device)
+        moe_model.eval()
+        
+        # Create test dataset
+        MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+        image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+        
+        test_datasets = []
+        for dataset_name in ['CSAW', 'DMID', 'DDSM']:
+            test_dataset, _ = create_dataset_with_labels(config, image_processor, dataset_name, 'test')
+            test_datasets.append(test_dataset)
+        
+        combined_test = ConcatDataset(test_datasets)
+        
+        # Quick evaluation
+        training_args = TrainingArguments(
+            output_dir='./temp_eval',
+            per_device_eval_batch_size=8,
+            dataloader_num_workers=0,
+            remove_unused_columns=False,
+            report_to=[],
+        )
+        
+        eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+        
+        trainer = Trainer(
+            model=moe_model,
+            args=training_args,
+            processing_class=image_processor,
+            data_collator=collate_fn,
+            compute_metrics=eval_compute_metrics_fn,
+        )
+        
+        results = trainer.evaluate(eval_dataset=combined_test, metric_key_prefix='test')
+        
+        print(f"Epoch {epoch_num} MoE Results:")
+        for key, value in results.items():
+            if isinstance(value, float):
+                print(f"  {key}: {value:.4f}")
+        
+        # Print routing stats
+        stats = moe_model.get_routing_stats()
+        print(f"Routing: CSAW={stats['CSAW']*100:.1f}%, DMID={stats['DMID']*100:.1f}%, DDSM={stats['DDSM']*100:.1f}%")
+        
+    except Exception as e:
+        print(f"MoE test failed: {e}")
+
+def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
+    """Main function - much simpler approach."""
+    config = load_config(config_path)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if weight_dir is not None:
+        expert_weights_dir = weight_dir
+    else:
+        expert_weights_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
+    
+    print(f"Using device: {device}")
+    print(f"Expert weights: {expert_weights_dir}")
+    
+    if phase == "1" or phase is None:
+        # Train simple dataset classifier
+        classifier = train_dataset_classifier(config, device, epoch, expert_weights_dir)
+        
+        if phase == "1":
+            print("Phase 1 completed.")
+            return
+    
+    if phase == "2" or phase is None:
+        # Final test with best classifier
+        print("\n" + "="*50)
+        print("FINAL TEST WITH BEST CLASSIFIER")
+        print("="*50)
+        
+        classifier_path = os.path.join(expert_weights_dir, 'dataset_classifier_best', 'classifier.pth')
+        if not os.path.exists(classifier_path):
+            raise FileNotFoundError(f"Classifier not found: {classifier_path}")
+        
+        classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
+        classifier.load_state_dict(torch.load(classifier_path, map_location=device))
+        classifier.eval()
+        
+        test_moe_with_classifier(config, classifier, device, "FINAL", expert_weights_dir)
+    
+    print("\n" + "="*50)
+    print("TRAINING COMPLETE!")
+    print("="*50)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Number of epochs')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Expert weights directory')
+    parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase')
+    args = parser.parse_args()
+
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase)
     train_expert_counts = np.bincount(train_routing_labels[:len(train_performances)], minlength=3)
     print(f"Training expert distribution: CSAW={train_expert_counts[0]}, DMID={train_expert_counts[1]}, DDSM={train_expert_counts[2]}")
     
