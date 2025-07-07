@@ -300,9 +300,35 @@ def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None):
     # Create Router MoE model
     model = ImageRouterMoE(expert_models, device).to(device)
     
-    # Load saved weights
-    print(f"Loading saved model from: {model_path}")
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    # Handle both directory and file paths (same as test.py pattern)
+    if os.path.isdir(model_path):
+        # Directory path - look for pytorch_model.bin or model.safetensors
+        pytorch_model_path = os.path.join(model_path, "pytorch_model.bin")
+        safetensors_path = os.path.join(model_path, "model.safetensors")
+        
+        if os.path.exists(pytorch_model_path):
+            model_file = pytorch_model_path
+            print(f"Loading saved model from: {model_file}")
+            model.load_state_dict(torch.load(model_file, map_location=device))
+        elif os.path.exists(safetensors_path):
+            model_file = safetensors_path
+            print(f"Loading saved model from: {model_file}")
+            # For safetensors, we need different loading
+            from safetensors.torch import load_file
+            state_dict = load_file(model_file)
+            model.load_state_dict(state_dict)
+        else:
+            raise FileNotFoundError(f"No model file found in directory: {model_path}")
+    else:
+        # Direct file path
+        print(f"Loading saved model from: {model_path}")
+        if model_path.endswith('.safetensors'):
+            from safetensors.torch import load_file
+            state_dict = load_file(model_path)
+            model.load_state_dict(state_dict)
+        else:
+            model.load_state_dict(torch.load(model_path, map_location=device))
+    
     model.eval()
     
     # Create test dataset
