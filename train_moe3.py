@@ -907,7 +907,7 @@ if __name__ == "__main__":
     parser.add_argument('--epoch', type=int, default=None, help='Number of epochs')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name')
     parser.add_argument('--weight_dir', type=str, default=None, help='Expert weights directory')
-    parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase (1: router only, 2: MoE only, None: both)')
+    parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase')
     args = parser.parse_args()
 
     main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase)
