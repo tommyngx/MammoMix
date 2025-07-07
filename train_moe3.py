@@ -596,6 +596,14 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
     # Create MoE model (same structure as train_moe2.py)
     model = SimpleMoE(expert_models, classifier, device).to(device)
     
+    # Save initial MoE model after creation
+    moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
+    os.makedirs(moe_save_dir, exist_ok=True)
+    
+    initial_moe_path = os.path.join(moe_save_dir, 'moe_initial.pth')
+    torch.save(model.state_dict(), initial_moe_path)
+    print(f"Initial MoE model saved to: {initial_moe_path}")
+    
     # Create datasets exactly like train_moe2.py
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
@@ -683,6 +691,11 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
     print(f"\n=== Training SimpleMoE on {dataset_name} ===")
     trainer.train()
     
+    # Save trained MoE model explicitly (in addition to Trainer's automatic saving)
+    trained_moe_path = os.path.join(moe_save_dir, 'moe_trained.pth')
+    torch.save(model.state_dict(), trained_moe_path)
+    print(f"Trained MoE model saved to: {trained_moe_path}")
+    
     print(f"\n=== Testing SimpleMoE on {dataset_name} test set ===")
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     
@@ -700,10 +713,11 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
     for expert_name, usage in final_stats.items():
         print(f"{expert_name}: {usage*100:.1f}%")
     
-    # Save final results in moe_MOMO directory
-    moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
-    os.makedirs(moe_save_dir, exist_ok=True)
+    # Save final MoE model after testing
+    final_moe_path = os.path.join(moe_save_dir, 'moe_final.pth')
+    torch.save(model.state_dict(), final_moe_path)
     
+    # Save final results in moe_MOMO directory
     # Save final classifier
     final_classifier_path = os.path.join(moe_save_dir, 'classifier_final.pth')
     torch.save(classifier.state_dict(), final_classifier_path)
@@ -720,9 +734,10 @@ def run_moe_like_train_moe2(config, classifier, device, dataset_name, expert_wei
         json_results['routing_stats'] = final_stats
         json.dump(json_results, f, indent=2)
     
-    print(f"Final MoE model and results saved to {moe_save_dir}")
-    print(f"Classifier saved to: {final_classifier_path}")
+    print(f"Final MoE model saved to: {final_moe_path}")
+    print(f"Final classifier saved to: {final_classifier_path}")
     print(f"Results saved to: {final_results_path}")
+    print(f"All models and results saved to: {moe_save_dir}")
     
     return test_results
 
@@ -758,6 +773,11 @@ def test_only_mode(config, device, dataset_name, expert_weights_dir):
     model = SimpleMoE(expert_models, classifier, device).to(device)
     model.eval()
     print("Created SimpleMoE with loaded classifier")
+    
+    # Save the created MoE model for test-only mode
+    test_moe_path = os.path.join(moe_save_dir, 'moe_test_only.pth')
+    torch.save(model.state_dict(), test_moe_path)
+    print(f"Test-only MoE model saved to: {test_moe_path}")
     
     # Create test dataset
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
@@ -827,6 +847,7 @@ def test_only_mode(config, device, dataset_name, expert_weights_dir):
         json.dump(json_results, f, indent=2)
     
     print(f"Test results saved to: {test_results_path}")
+    print(f"Test-only MoE model saved to: {test_moe_path}")
     
     return test_results
 
