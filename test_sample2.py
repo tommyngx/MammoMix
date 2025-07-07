@@ -244,15 +244,38 @@ def evaluate_model(model, test_dataset, image_processor, config, device, model_n
     print(f"\n=== Testing {model_name} ===")
     
     try:
-        # Test output format
-        test_model_output_format(model, test_dataset, device, model_name)
+        # Test output format with detailed debugging
+        print(f"=== Debugging {model_name} Output ===")
+        debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+        debug_batch = next(iter(debug_loader))
+        
+        with torch.no_grad():
+            output = model(debug_batch['pixel_values'].to(device))
+            print(f"{model_name} output:")
+            print(f"  Type: {type(output)}")
+            print(f"  Logits shape: {output.logits.shape}")
+            print(f"  Pred boxes shape: {output.pred_boxes.shape}")
+            print(f"  Pred boxes dtype: {output.pred_boxes.dtype}")
+            print(f"  Pred boxes last dim: {output.pred_boxes.shape[-1]}")
+            print(f"  Has loss: {hasattr(output, 'loss')}")
+            print(f"  Has last_hidden_state: {hasattr(output, 'last_hidden_state')}")
+            
+            # Print actual pred_boxes values for debugging
+            print(f"  First few pred_boxes values:")
+            if output.pred_boxes.dim() == 3:
+                print(f"    Batch 0, Query 0: {output.pred_boxes[0, 0, :]}")
+                print(f"    Shape of first query: {output.pred_boxes[0, 0, :].shape}")
+                print(f"    Total dimensions in last axis: {output.pred_boxes.shape[-1]}")
+            else:
+                print(f"    Unexpected pred_boxes dimensions: {output.pred_boxes.dim()}")
+                print(f"    Full shape: {output.pred_boxes.shape}")
         
         # Setup trainer
         training_cfg = config.get('training', {})
         per_device_eval_batch_size = training_cfg.get('batch_size', 8)
         
         training_args = TrainingArguments(
-            output_dir=f'./temp_{model_name.lower()}_output',
+            output_dir=f'./temp_{model_name.lower().replace(" ", "_").replace("(", "").replace(")", "")}_output',
             per_device_eval_batch_size=per_device_eval_batch_size,
             dataloader_num_workers=0,
             remove_unused_columns=False,
@@ -272,7 +295,7 @@ def evaluate_model(model, test_dataset, image_processor, config, device, model_n
         )
         
         # Evaluate
-        results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix=model_name.lower())
+        results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix=model_name.lower().replace(" ", "_").replace("(", "").replace(")", ""))
         
         print(f"\n=== {model_name} Test Results ===")
         for key, value in results.items():
@@ -486,13 +509,49 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, num_samples=8, 
             if len(models_list) >= 2:
                 # Create MoE
                 integrated_moe = create_moe_model(models_list, moe_model, device)
+                
+                # Debug: Compare raw outputs before wrapping
+                print(f"\n=== Raw Output Comparison ===")
+                debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+                debug_batch = next(iter(debug_loader))
+                
+                with torch.no_grad():
+                    # Expert raw output
+                    expert_output = expert_model(debug_batch['pixel_values'].to(device))
+                    print(f"Expert raw output:")
+                    print(f"  Logits shape: {expert_output.logits.shape}")
+                    print(f"  Pred boxes shape: {expert_output.pred_boxes.shape}")
+                    print(f"  Pred boxes last dim: {expert_output.pred_boxes.shape[-1]}")
+                    print(f"  Expert pred_boxes[0,0,:]: {expert_output.pred_boxes[0, 0, :]}")
+                    
+                    # Raw MoE output
+                    raw_moe_detector = MoEObjectDetectionModel(integrated_moe).to(device)
+                    raw_moe_output = raw_moe_detector(debug_batch['pixel_values'].to(device))
+                    print(f"Raw MoE output:")
+                    print(f"  Logits shape: {raw_moe_output.logits.shape}")
+                    print(f"  Pred boxes shape: {raw_moe_output.pred_boxes.shape}")
+                    print(f"  Pred boxes last dim: {raw_moe_output.pred_boxes.shape[-1]}")
+                    print(f"  Raw MoE pred_boxes[0,0,:]: {raw_moe_output.pred_boxes[0, 0, :]}")
+                    
+                    # Check if the issue is in the raw MoE output
+                    if raw_moe_output.pred_boxes.shape[-1] != 4:
+                        print(f"ISSUE FOUND: Raw MoE pred_boxes has {raw_moe_output.pred_boxes.shape[-1]} dimensions instead of 4")
+                        print(f"Raw MoE pred_boxes sample values: {raw_moe_output.pred_boxes[0, 0, :8] if raw_moe_output.pred_boxes.shape[-1] > 8 else raw_moe_output.pred_boxes[0, 0, :]}")
+                
+                # Create validated wrapper
                 moe_detector = ValidatedMoEObjectDetectionModel(
                     MoEObjectDetectionModel(integrated_moe), 
                     image_processor
                 ).to(device)
                 
-                # Test output format
-                test_model_output_format(moe_detector, test_dataset, device, "MoE")
+                # Test wrapped output
+                with torch.no_grad():
+                    wrapped_moe_output = moe_detector(debug_batch['pixel_values'].to(device))
+                    print(f"Wrapped MoE output:")
+                    print(f"  Logits shape: {wrapped_moe_output.logits.shape}")
+                    print(f"  Pred boxes shape: {wrapped_moe_output.pred_boxes.shape}")
+                    print(f"  Pred boxes last dim: {wrapped_moe_output.pred_boxes.shape[-1]}")
+                    print(f"  Wrapped MoE pred_boxes[0,0,:]: {wrapped_moe_output.pred_boxes[0, 0, :]}")
                 
                 # Test post-processing
                 if not test_post_processing(moe_detector, test_dataset, image_processor, device):
