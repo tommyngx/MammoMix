@@ -130,7 +130,7 @@ class ValidatedMoEObjectDetectionModel(torch.nn.Module):
         super().__init__()
         self.moe_model = moe_model
         self.reference_processor = reference_processor
-        self.debug_count = 0  # Add debug counter
+        self.debug_count = 0
         
     def forward(self, pixel_values, labels=None):
         # Get MoE output
@@ -149,81 +149,54 @@ class ValidatedMoEObjectDetectionModel(torch.nn.Module):
         if pred_boxes.dim() == 2:
             pred_boxes = pred_boxes.unsqueeze(0)
         
-        # Debug: Print every few calls to see what's happening during evaluation
         self.debug_count += 1
         if self.debug_count <= 3 or self.debug_count % 10 == 0:
             print(f"DEBUG Forward #{self.debug_count}: input shape {pixel_values.shape}, pred_boxes shape {pred_boxes.shape}")
         
-        # Fix pred_boxes dimensions - make this more robust
-        pred_boxes = self._fix_pred_boxes_shape(pred_boxes)
+        # Create a completely new tensor to ensure it's properly formatted
+        # This avoids any potential memory layout or tensor view issues
+        batch_size, num_queries = pred_boxes.shape[:2]
         
-        # Create dummy components for evaluation
+        # Ensure pred_boxes has exactly 4 dimensions by creating a new tensor
+        if pred_boxes.shape[-1] != 4:
+            if self.debug_count <= 5:
+                print(f"DEBUG: Reshaping pred_boxes from {pred_boxes.shape}")
+            
+            # Create new tensor with exactly 4 dimensions
+            new_pred_boxes = torch.zeros(batch_size, num_queries, 4, 
+                                       device=pred_boxes.device, dtype=pred_boxes.dtype)
+            
+            # Copy available dimensions (take first 4 if more, pad with zeros if less)
+            copy_dims = min(4, pred_boxes.shape[-1])
+            new_pred_boxes[..., :copy_dims] = pred_boxes[..., :copy_dims]
+            pred_boxes = new_pred_boxes
+            
+            if self.debug_count <= 5:
+                print(f"DEBUG: Created new pred_boxes with shape: {pred_boxes.shape}")
+        else:
+            # Even if shape is correct, create a new contiguous tensor to avoid any issues
+            pred_boxes = pred_boxes.clone().contiguous()
+        
+        # Create loss and last_hidden_state to match expert model output exactly
         loss = torch.tensor(0.0, device=pixel_values.device, requires_grad=False)
-        batch_size, num_queries = logits.shape[:2]
         hidden_size = 768
         last_hidden_state = torch.zeros(batch_size, num_queries, hidden_size, 
                                        device=logits.device, dtype=logits.dtype)
         
-        # Final validation before returning
+        # Create the output object
         final_output = YolosObjectDetectionOutput(
             loss=loss,
-            logits=logits,
+            logits=logits.clone().contiguous(),  # Ensure contiguous
             pred_boxes=pred_boxes,
             last_hidden_state=last_hidden_state
         )
         
-        # Extra safety check
-        if final_output.pred_boxes.shape[-1] != 4:
-            print(f"ERROR: Final output still has wrong pred_boxes shape: {final_output.pred_boxes.shape}")
-            # Force fix it again
-            final_output.pred_boxes = final_output.pred_boxes[..., :4]
-            print(f"FIXED: Forced pred_boxes to shape: {final_output.pred_boxes.shape}")
+        # Final validation
+        assert final_output.pred_boxes.shape[-1] == 4, f"Final pred_boxes must have 4 coordinates, got {final_output.pred_boxes.shape}"
+        assert final_output.pred_boxes.dim() == 3, f"Final pred_boxes must be 3D [batch, queries, 4], got {final_output.pred_boxes.shape}"
+        assert final_output.pred_boxes.is_contiguous(), "Final pred_boxes must be contiguous"
         
         return final_output
-    
-    def _fix_pred_boxes_shape(self, pred_boxes):
-        """Ensure pred_boxes has exactly 4 coordinates."""
-        original_shape = pred_boxes.shape
-        
-        # More aggressive checking and fixing
-        if pred_boxes.shape[-1] != 4:
-            if self.debug_count <= 5:  # Only print first few times
-                print(f"DEBUG: Fixing pred_boxes shape from {original_shape}")
-            
-            if pred_boxes.shape[-1] > 4:
-                pred_boxes = pred_boxes[..., :4]
-                if self.debug_count <= 5:
-                    print(f"DEBUG: Truncated pred_boxes to shape: {pred_boxes.shape}")
-            else:
-                batch_size, num_queries = pred_boxes.shape[:2]
-                padding_size = 4 - pred_boxes.shape[-1]
-                padding = torch.zeros(batch_size, num_queries, padding_size, 
-                                    device=pred_boxes.device, dtype=pred_boxes.dtype)
-                pred_boxes = torch.cat([pred_boxes, padding], dim=-1)
-                if self.debug_count <= 5:
-                    print(f"DEBUG: Padded pred_boxes to shape: {pred_boxes.shape}")
-        
-        # Ensure it's contiguous and properly shaped
-        pred_boxes = pred_boxes.contiguous()
-        
-        # Final safety check
-        if pred_boxes.shape[-1] != 4:
-            if self.debug_count <= 5:
-                print(f"WARNING: pred_boxes still wrong shape {pred_boxes.shape}, force fixing")
-            batch_size, num_queries = pred_boxes.shape[:2]
-            new_pred_boxes = torch.zeros(batch_size, num_queries, 4, 
-                                        device=pred_boxes.device, dtype=pred_boxes.dtype)
-            copy_dims = min(4, pred_boxes.shape[-1])
-            new_pred_boxes[..., :copy_dims] = pred_boxes[..., :copy_dims]
-            pred_boxes = new_pred_boxes.contiguous()
-            if self.debug_count <= 5:
-                print(f"DEBUG: Force fixed pred_boxes to shape: {pred_boxes.shape}")
-        
-        # Validate final shape
-        assert pred_boxes.shape[-1] == 4, f"pred_boxes must have 4 coordinates, got shape {pred_boxes.shape}"
-        assert pred_boxes.dim() == 3, f"pred_boxes must be 3D [batch, queries, 4], got shape {pred_boxes.shape}"
-        
-        return pred_boxes
 
 def test_model_output_format(model, test_dataset, device, model_name="Model"):
     """Test and debug model output format."""
@@ -269,17 +242,38 @@ def evaluate_model(model, test_dataset, image_processor, config, device, model_n
     print(f"\n=== Testing {model_name} ===")
     
     try:
-        # Simplified debugging - focus on the issue
+        # Test single batch first
         debug_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
         debug_batch = next(iter(debug_loader))
         
         with torch.no_grad():
             output = model(debug_batch['pixel_values'].to(device))
-            # Only print if there's an issue
             if output.pred_boxes.shape[-1] != 4:
                 print(f"ISSUE: {model_name} pred_boxes wrong shape: {output.pred_boxes.shape}")
             else:
                 print(f"{model_name} output validation: pred_boxes shape OK {output.pred_boxes.shape}")
+            
+            # For MoE, do additional validation
+            if "moe" in model_name.lower():
+                print(f"MoE additional validation:")
+                print(f"  pred_boxes dtype: {output.pred_boxes.dtype}")
+                print(f"  pred_boxes is_contiguous: {output.pred_boxes.is_contiguous()}")
+                print(f"  pred_boxes device: {output.pred_boxes.device}")
+                print(f"  logits shape: {output.logits.shape}")
+                print(f"  logits dtype: {output.logits.dtype}")
+                
+                # Test the post-processing function directly
+                try:
+                    test_target_sizes = torch.tensor([[640, 640]], device=device)
+                    post_processed = image_processor.post_process_object_detection(
+                        output, threshold=0.1, target_sizes=test_target_sizes
+                    )
+                    print(f"  Direct post-processing test: SUCCESS")
+                except Exception as e:
+                    print(f"  Direct post-processing test: FAILED - {e}")
+                    # Try to understand what's wrong
+                    print(f"    pred_boxes sample: {output.pred_boxes[0, 0, :]}")
+                    print(f"    pred_boxes requires_grad: {output.pred_boxes.requires_grad}")
         
         # Setup trainer
         training_cfg = config.get('training', {})
