@@ -43,41 +43,26 @@ def load_config(config_path):
 class ImageRouterMoE(nn.Module):
     """
     Router-based MoE that learns to route images to the best expert.
-    Uses a minimal CNN to classify which expert should handle each image.
+    SIMPLIFIED: Much simpler architecture for faster training
     """
     def __init__(self, expert_models, device):
         super().__init__()
         self.experts = nn.ModuleList(expert_models)  # [CSAW, DMID, DDSM]
         self.device = device
         
-        # IMPROVED router network: more capacity and better architecture
+        # ULTRA SIMPLE router network: just 2 layers
         self.router = nn.Sequential(
-            # Better feature extractor
-            nn.Conv2d(3, 32, 7, stride=4, padding=3),  # 640->160
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(4),  # 160->40
+            # Very simple feature extractor
+            nn.AdaptiveAvgPool2d(1),  # Global average pooling: 640x640x3 -> 1x1x3
+            nn.Flatten(),             # 3 features
             
-            nn.Conv2d(32, 64, 5, stride=2, padding=2),  # 40->20
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),  # 20->10
-            
-            nn.Conv2d(64, 128, 3, stride=1, padding=1),  # 10->10
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1),  # Global average pooling -> 1x1
-            nn.Flatten(),
-            
-            # Better classifier with dropout
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(64, 3),  # Output 3 experts
+            # Direct classification - no hidden layers
+            nn.Linear(3, 3),          # RGB -> 3 experts directly
         )
         
-        # Initialize weights properly
-        self._initialize_weights()
+        # Simple initialization
+        nn.init.xavier_uniform_(self.router[2].weight)
+        nn.init.zeros_(self.router[2].bias)
         
         # Freeze expert models (similar to train.py approach)
         for expert in self.experts:
@@ -90,68 +75,37 @@ class ImageRouterMoE(nn.Module):
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f'Total parameters: {total_params / 1e6:.2f}M')
-        print(f'Trainable parameters: {trainable_params / 1e3:.2f}K (router only)')
+        print(f'Trainable parameters: {trainable_params:.0f} (router only - ULTRA SIMPLE)')
     
-    def _initialize_weights(self):
-        """Initialize weights properly for faster convergence"""
-        for m in self.router.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.constant_(m.bias, 0)
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """Enable gradient checkpointing for compatibility with Transformers Trainer."""
+        pass
+    
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing for compatibility with Transformers Trainer."""
+        pass
     
     def forward(self, pixel_values, labels=None, return_routing=False):
         """
         Forward pass: route each image to best expert and return expert's output.
-        IMPROVED: Better routing supervision and loss computation
+        SIMPLIFIED: Much simpler routing logic
         """
         batch_size = pixel_values.shape[0]
         
-        # Get routing probabilities
+        # Get routing probabilities - SUPER SIMPLE
         routing_logits = self.router(pixel_values)  # Shape: (batch_size, 3)
-        routing_probs = F.softmax(routing_logits, dim=1)
-        expert_choices = torch.argmax(routing_probs, dim=1)  # Shape: (batch_size,)
+        expert_choices = torch.argmax(routing_logits, dim=1)  # Shape: (batch_size,)
         
-        # IMPROVED routing loss computation
+        # SIMPLIFIED routing loss computation - only during training
         routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         if labels is not None:
-            # Get outputs from all experts to compare losses (for routing learning)
-            expert_losses = []
-            expert_outputs_list = []
-            
-            for expert_idx in range(len(self.experts)):
-                with torch.no_grad():
-                    expert_output = self.experts[expert_idx](pixel_values, labels=labels)
-                    expert_output = self._fix_expert_output_dimensions(expert_output)
-                    expert_outputs_list.append(expert_output)
-                    
-                    if hasattr(expert_output, 'loss') and expert_output.loss is not None:
-                        expert_losses.append(expert_output.loss)
-            
-            if len(expert_losses) > 0:
-                # IMPROVED: Use both loss comparison AND diversity encouragement
-                expert_losses_tensor = torch.stack(expert_losses)
-                
-                # Find best expert for each sample
-                best_expert_indices = torch.argmin(expert_losses_tensor.unsqueeze(0).expand(batch_size, -1), dim=1)
-                
-                # STRONGER routing supervision: Cross entropy + confidence penalty
-                routing_loss = F.cross_entropy(routing_logits, best_expert_indices)
-                
-                # Add diversity loss to prevent collapse to single expert
-                expert_usage = F.softmax(routing_logits, dim=1).mean(dim=0)  # Average usage per expert
-                target_usage = torch.ones_like(expert_usage) / len(self.experts)  # Uniform usage
-                diversity_loss = F.kl_div(expert_usage.log(), target_usage, reduction='batchmean')
-                
-                routing_loss = routing_loss + 0.1 * diversity_loss
+            # Simple approach: just encourage uniform distribution
+            routing_probs = F.softmax(routing_logits, dim=1)
+            expert_usage = routing_probs.mean(dim=0)  # Average usage per expert
+            target_usage = torch.ones_like(expert_usage) / len(self.experts)  # Uniform
+            routing_loss = F.mse_loss(expert_usage, target_usage)
         
-        # For batch processing, we need to group by expert choice
+        # For batch processing, group by expert choice
         expert_groups = {}
         for i in range(batch_size):
             expert_idx = expert_choices[i].item()
@@ -159,7 +113,7 @@ class ImageRouterMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        # Get the first expert output to determine correct tensor shapes and dtypes
+        # Get the first expert output to determine tensor shapes
         first_expert_idx = list(expert_groups.keys())[0]
         first_sample_indices = expert_groups[first_expert_idx]
         first_expert_pixel_values = pixel_values[first_sample_indices]
@@ -169,10 +123,9 @@ class ImageRouterMoE(nn.Module):
         
         with torch.no_grad():
             reference_output = self.experts[first_expert_idx](first_expert_pixel_values, labels=first_expert_labels)
-            # CRITICAL: Fix dimensions immediately
             reference_output = self._fix_expert_output_dimensions(reference_output)
         
-        # Initialize output tensors with correct dtypes and shapes from reference
+        # Initialize output tensors
         num_queries = reference_output.logits.shape[1]
         num_classes = reference_output.logits.shape[2]
         
@@ -185,7 +138,7 @@ class ImageRouterMoE(nn.Module):
         
         # Use the reference output for the first group
         batch_logits[first_sample_indices] = reference_output.logits
-        batch_pred_boxes[first_sample_indices] = reference_output.pred_boxes  # Already fixed to 4D above
+        batch_pred_boxes[first_sample_indices] = reference_output.pred_boxes
         
         if hasattr(reference_output, 'loss') and reference_output.loss is not None:
             batch_loss = batch_loss + reference_output.loss * len(first_sample_indices) / batch_size
@@ -196,26 +149,20 @@ class ImageRouterMoE(nn.Module):
                                                  device=pixel_values.device, dtype=reference_output.last_hidden_state.dtype)
             batch_last_hidden_state[first_sample_indices] = reference_output.last_hidden_state
         
-        # Process remaining expert groups (skip the first one we already processed)
+        # Process remaining expert groups
         remaining_groups = {k: v for k, v in expert_groups.items() if k != first_expert_idx}
         for expert_idx, sample_indices in remaining_groups.items():
-            # Get inputs for this expert
             expert_pixel_values = pixel_values[sample_indices]
-            
-            # Fix: Handle labels properly - labels is a list, so we need to extract individual items
             expert_labels = None
             if labels is not None:
                 expert_labels = [labels[i] for i in sample_indices]
             
-            # Get expert output
             with torch.no_grad():
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-                # CRITICAL: Fix dimensions immediately after getting expert output
                 expert_output = self._fix_expert_output_dimensions(expert_output)
             
-            # Place expert outputs back into batch positions
             batch_logits[sample_indices] = expert_output.logits
-            batch_pred_boxes[sample_indices] = expert_output.pred_boxes  # Now guaranteed to be 4D
+            batch_pred_boxes[sample_indices] = expert_output.pred_boxes
             
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 batch_loss = batch_loss + expert_output.loss * len(sample_indices) / batch_size
@@ -223,71 +170,33 @@ class ImageRouterMoE(nn.Module):
             if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
                 batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
         
-        # Add STRONGER routing loss to total loss (increased weight)
+        # Add VERY SMALL routing loss - just for diversity
         if labels is not None and routing_loss.item() > 0:
-            batch_loss = batch_loss + 0.5 * routing_loss  # Increased from 0.1 to 0.5
+            batch_loss = batch_loss + 0.01 * routing_loss  # Very small weight
         
-        # Final safety check - ensure ALL outputs have exactly 4 dimensions
-        assert batch_pred_boxes.shape[-1] == 4, f"FINAL CHECK FAILED: pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
-        
-        # Additional safety: force contiguous and ensure exact 4D for all outputs
+        # Final safety check
+        assert batch_pred_boxes.shape[-1] == 4, f"pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
         batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
         
-        # Create output exactly like a single YOLOS model
+        # Create output
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
         
         combined_output = YolosObjectDetectionOutput(
             loss=batch_loss,
             logits=batch_logits,
-            pred_boxes=batch_pred_boxes,  # Now guaranteed to be exactly 4D
+            pred_boxes=batch_pred_boxes,
             last_hidden_state=batch_last_hidden_state
         )
         
-        # CRITICAL: Final check before returning - ensure pred_boxes is exactly 4D
-        if combined_output.pred_boxes.shape[-1] != 4:
-            print(f"EMERGENCY: Final output pred_boxes has {combined_output.pred_boxes.shape[-1]} dims, forcing to 4")
-            combined_output.pred_boxes = combined_output.pred_boxes[..., :4].contiguous()
-        
-        # ABSOLUTE FINAL SAFETY CHECK: Override the pred_boxes attribute completely
-        original_shape = combined_output.pred_boxes.shape
-        if len(original_shape) >= 2 and original_shape[-1] != 4:
-            print(f"ABSOLUTE OVERRIDE: Forcing pred_boxes from shape {original_shape} to 4D")
-            # Create a completely new tensor with exactly 4 dimensions
-            safe_pred_boxes = torch.zeros(
-                *original_shape[:-1], 4,  # Keep all dims except last, force last to be 4
-                device=combined_output.pred_boxes.device,
-                dtype=combined_output.pred_boxes.dtype
-            )
-            # Copy the first 4 dimensions of the original
-            min_dims = min(4, original_shape[-1])
-            safe_pred_boxes[..., :min_dims] = combined_output.pred_boxes[..., :min_dims]
-            
-            # Create a new output object with the safe pred_boxes
-            combined_output = YolosObjectDetectionOutput(
-                loss=combined_output.loss,
-                logits=combined_output.logits,
-                pred_boxes=safe_pred_boxes.contiguous(),
-                last_hidden_state=combined_output.last_hidden_state
-            )
-        
-        # Final verification
-        final_shape = combined_output.pred_boxes.shape
-        assert final_shape[-1] == 4, f"CRITICAL FAILURE: pred_boxes still has {final_shape[-1]} dims after all safety checks!"
-        
         if return_routing:
-            return combined_output, routing_probs, expert_choices
+            return combined_output, F.softmax(routing_logits, dim=1), expert_choices
         else:
             return combined_output
     
     def _fix_expert_output_dimensions(self, expert_output):
-        """
-        Centralized method to fix expert output dimensions.
-        Ensures pred_boxes always has exactly 4 dimensions.
-        """
+        """Fix expert output dimensions to ensure pred_boxes has exactly 4 dimensions."""
         if expert_output.pred_boxes.shape[-1] != 4:
-            # Create a new output object with fixed dimensions
             fixed_pred_boxes = expert_output.pred_boxes[..., :4].contiguous()
-            
             fixed_output = type(expert_output)(
                 loss=expert_output.loss,
                 logits=expert_output.logits,
@@ -295,7 +204,6 @@ class ImageRouterMoE(nn.Module):
                 last_hidden_state=expert_output.last_hidden_state if hasattr(expert_output, 'last_hidden_state') else None
             )
             return fixed_output
-        
         return expert_output
 
 def load_expert_models(weight_dir, device):
@@ -565,17 +473,17 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"RouterMoE_{DATASET_NAME}_{date_str}"
     
-    # IMPROVED training arguments for faster convergence
+    # ULTRA SIMPLE training arguments for very fast convergence
     training_args = TrainingArguments(
         output_dir=output_dir,
         run_name=run_name,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
-        learning_rate=1e-4,  # INCREASED learning rate for router
-        weight_decay=weight_decay,
-        warmup_ratio=0.1,  # INCREASED warmup
-        lr_scheduler_type='cosine',  # Better scheduler
+        learning_rate=1e-3,  # HIGH learning rate for simple router
+        weight_decay=0.0,    # NO weight decay for simple model
+        warmup_ratio=0.0,    # NO warmup needed
+        lr_scheduler_type='constant',  # CONSTANT learning rate
         lr_scheduler_kwargs={},
         eval_do_concat_batches=eval_do_concat_batches,
         disable_tqdm=False,
@@ -583,17 +491,16 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=save_total_limit,
-        logging_strategy="steps",  # More frequent logging
-        logging_steps=10,  # Log every 10 steps
+        logging_strategy="steps",
+        logging_steps=5,  # Log very frequently
         report_to="all",
         load_best_model_at_end=True,
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
         fp16=torch.cuda.is_available(),
         dataloader_num_workers=dataloader_num_workers,
-        gradient_accumulation_steps=1,  # REDUCED for more frequent updates
+        gradient_accumulation_steps=1,  # NO accumulation
         remove_unused_columns=remove_unused_columns,
-        gradient_checkpointing=True,  # Save memory
     )
     
     # Evaluation metrics (same as train.py)
