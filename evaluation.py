@@ -52,57 +52,37 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
     post_processed_predictions = []
     predictions, targets = evaluation_results.predictions, evaluation_results.label_ids
 
+    # print(f"DEBUG: targets type: {type(targets)}")
+    # print(f"DEBUG: targets length: {len(targets)}")
+    # if len(targets) > 0:
+    #     print(f"DEBUG: first target type: {type(targets[0])}")
+    #     print(f"DEBUG: first target content: {targets[0]}")
+
     for batch in targets:
+        # print(f"DEBUG: processing batch type: {type(batch)}")
+        # print(f"DEBUG: batch content: {batch}")
+        #batch_image_sizes = torch.tensor(np.array([x['size'] for x in batch]))
         batch_image_sizes = torch.tensor(np.array([[MAX_SIZE, MAX_SIZE] for _ in batch]))
         image_sizes.append(batch_image_sizes)
         for image_target in batch:
+            # print(f"DEBUG: image_target type: {type(image_target)}")
+            # print(f"DEBUG: image_target content: {image_target}")
+            # print(f"DEBUG: Attempting to access image_target['boxes']...")
             boxes = torch.tensor(image_target['boxes'])
+            # print(f"DEBUG: boxes: {boxes}")
+            #boxes = convert_bbox_yolo_to_pascal(boxes, image_target['size'])
             boxes = convert_bbox_yolo_to_pascal(boxes, [MAX_SIZE, MAX_SIZE])
             labels = torch.tensor(image_target['class_labels'])
             post_processed_targets.append({'boxes': boxes, 'labels': labels})
-    
-    for batch_idx, (batch, target_sizes) in enumerate(zip(predictions, image_sizes)):
+
+    for batch, target_sizes in zip(predictions, image_sizes):
         batch_logits, batch_boxes = batch[1], batch[2]
-        
-        # CRITICAL FIX: Ensure batch_boxes is exactly 4D
-        batch_boxes_tensor = torch.tensor(batch_boxes)
-        if batch_boxes_tensor.shape[-1] != 4:
-            print(f"EVAL FIX: batch_boxes has {batch_boxes_tensor.shape[-1]} dims, forcing to 4")
-            batch_boxes_tensor = batch_boxes_tensor[..., :4]
-        
-        output = ModelOutput(logits=torch.tensor(batch_logits), pred_boxes=batch_boxes_tensor)
-        
-        try:
-            post_processed_output = image_processor.post_process_object_detection(
-                output, threshold=threshold, target_sizes=target_sizes
-            )
-            post_processed_predictions.extend(post_processed_output)
-        except Exception as e:
-            print(f"ERROR in evaluation batch {batch_idx}: {e}")
-            print(f"pred_boxes shape: {output.pred_boxes.shape}")
-            raise e
+        output = ModelOutput(logits=torch.tensor(batch_logits), pred_boxes=torch.tensor(batch_boxes))
+        post_processed_output = image_processor.post_process_object_detection(
+            output, threshold=threshold, target_sizes=target_sizes
+        )
+        post_processed_predictions.extend(post_processed_output)
 
-    metrics = mean_average_precision(post_processed_predictions, post_processed_targets)
-    metrics.pop('map_per_class')
-    return {k: v for k, v in metrics.items() if k.startswith('map')}
-
-def get_eval_compute_metrics_fn(image_processor):
-    return partial(
-        compute_metrics, image_processor=image_processor,
-        threshold=0.5, id2label={0: 'cancer'}
-    )
-            post_processed_output = image_processor.post_process_object_detection(
-                output, threshold=threshold, target_sizes=target_sizes
-            )
-            post_processed_predictions.extend(post_processed_output)
-            print(f"[DEBUG EVAL] Batch {batch_idx} processed successfully")
-        except Exception as e:
-            print(f"[DEBUG EVAL] ERROR in batch {batch_idx}: {e}")
-            print(f"[DEBUG EVAL] pred_boxes shape that caused error: {output.pred_boxes.shape}")
-            print(f"[DEBUG EVAL] pred_boxes content: {output.pred_boxes}")
-            raise e
-
-    print(f"[DEBUG EVAL] All batches processed, computing mAP...")
     metrics = mean_average_precision(post_processed_predictions, post_processed_targets)
     metrics.pop('map_per_class')
     return {k: v for k, v in metrics.items() if k.startswith('map')}
