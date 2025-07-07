@@ -483,8 +483,8 @@ def train_dataset_classifier(config, device, epoch=None, weight_dir=None):
     
     return classifier
 
-def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir):
-    """Test MoE with current classifier."""
+def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir, dataset_name=None):
+    """Test MoE with current classifier on specific dataset."""
     try:
         # Load expert models
         expert_models, _ = load_expert_models(weight_dir, device)
@@ -493,16 +493,24 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir):
         moe_model = SimpleMoE(expert_models, classifier, device).to(device)
         moe_model.eval()
         
-        # Create test dataset
+        # Create test dataset - use specific dataset if provided
         MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
         image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
         
-        test_datasets = []
-        for dataset_name in ['CSAW', 'DMID', 'DDSM']:
+        if dataset_name:
+            # Test on specific dataset only
             test_dataset, _ = create_dataset_with_labels(config, image_processor, dataset_name, 'test')
-            test_datasets.append(test_dataset)
-        
-        combined_test = ConcatDataset(test_datasets)
+            print(f"Testing MoE on {dataset_name} dataset: {len(test_dataset)} samples")
+        else:
+            # Test on combined datasets (original behavior)
+            test_datasets = []
+            for ds_name in ['CSAW', 'DMID', 'DDSM']:
+                test_dataset, _ = create_dataset_with_labels(config, image_processor, ds_name, 'test')
+                test_datasets.append(test_dataset)
+            
+            from torch.utils.data import ConcatDataset
+            test_dataset = ConcatDataset(test_datasets)
+            print(f"Testing MoE on combined datasets: {len(test_dataset)} samples")
         
         # Quick evaluation
         training_args = TrainingArguments(
@@ -523,9 +531,10 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir):
             compute_metrics=eval_compute_metrics_fn,
         )
         
-        results = trainer.evaluate(eval_dataset=combined_test, metric_key_prefix='test')
+        results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
         
-        print(f"Epoch {epoch_num} MoE Results:")
+        test_name = dataset_name if dataset_name else "Combined"
+        print(f"Epoch {epoch_num} MoE Results on {test_name}:")
         for key, value in results.items():
             if isinstance(value, float):
                 print(f"  {key}: {value:.4f}")
@@ -534,8 +543,11 @@ def test_moe_with_classifier(config, classifier, device, epoch_num, weight_dir):
         stats = moe_model.get_routing_stats()
         print(f"Routing: CSAW={stats['CSAW']*100:.1f}%, DMID={stats['DMID']*100:.1f}%, DDSM={stats['DDSM']*100:.1f}%")
         
+        return results
+        
     except Exception as e:
         print(f"MoE test failed: {e}")
+        return None
 
 def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
     """Main function - much simpler approach."""
@@ -550,6 +562,8 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
     
     print(f"Using device: {device}")
     print(f"Expert weights: {expert_weights_dir}")
+    if dataset:
+        print(f"Target dataset: {dataset}")
     
     if phase == "1" or phase is None:
         # Train simple dataset classifier
@@ -560,7 +574,7 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
             return
     
     if phase == "2" or phase is None:
-        # Final test with best classifier
+        # Final test with best classifier on specific dataset
         print("\n" + "="*50)
         print("FINAL TEST WITH BEST CLASSIFIER")
         print("="*50)
@@ -573,19 +587,9 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
         classifier.load_state_dict(torch.load(classifier_path, map_location=device))
         classifier.eval()
         
-        test_moe_with_classifier(config, classifier, device, "FINAL", expert_weights_dir)
+        # Test on specified dataset or all datasets
+        test_moe_with_classifier(config, classifier, device, "FINAL", expert_weights_dir, dataset)
     
     print("\n" + "="*50)
     print("TRAINING COMPLETE!")
     print("="*50)
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
-    parser.add_argument('--epoch', type=int, default=None, help='Number of epochs')
-    parser.add_argument('--dataset', type=str, default=None, help='Dataset name')
-    parser.add_argument('--weight_dir', type=str, default=None, help='Expert weights directory')
-    parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase')
-    args = parser.parse_args()
-
-    main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase)
