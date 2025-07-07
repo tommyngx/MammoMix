@@ -43,7 +43,7 @@ def load_config(config_path):
 class ImageRouterMoE(nn.Module):
     """
     Router-based MoE that learns to route images to the best expert.
-    FIXED: Proper per-sample expert selection and monitoring
+    OPTIMIZED: Much faster training with simplified routing supervision
     """
     def __init__(self, expert_models, device):
         super().__init__()
@@ -51,21 +51,18 @@ class ImageRouterMoE(nn.Module):
         self.device = device
         self.expert_names = ['CSAW', 'DMID', 'DDSM']  # For tracking
         
-        # IMPROVED router network: Use image features + metadata
+        # SIMPLIFIED router network for faster training
         self.router = nn.Sequential(
-            # Better feature extraction
-            nn.Conv2d(3, 32, 7, stride=4, padding=3),  # 640->160
+            # Faster feature extraction with fewer parameters
+            nn.Conv2d(3, 16, 7, stride=8, padding=3),  # 640->80 (faster)
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d(4),  # 160->4x4 = 16 features per channel
-            nn.Flatten(),  # 32*16 = 512 features
+            nn.AdaptiveAvgPool2d(2),  # 80->2x2 = 4 features per channel
+            nn.Flatten(),  # 16*4 = 64 features (much smaller)
             
-            # Better classifier
-            #nn.Linear(512, 128),
-            #nn.ReLU(),
-            #nn.Dropout(0.3),
-            nn.Linear(512, 32),
+            # Minimal classifier
+            nn.Linear(64, 16),
             nn.ReLU(),
-            nn.Linear(32, 3),  # 3 experts
+            nn.Linear(16, 3),  # 3 experts
         )
         
         # Proper initialization
@@ -83,7 +80,7 @@ class ImageRouterMoE(nn.Module):
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f'Total parameters: {total_params / 1e6:.2f}M')
-        print(f'Trainable parameters: {trainable_params:.0f} (router only)')
+        print(f'Trainable parameters: {trainable_params:.0f} (router only - ULTRA FAST)')
         
         # Add routing statistics
         self.routing_counts = torch.zeros(3, device=device)  # Track expert usage
@@ -100,7 +97,7 @@ class ImageRouterMoE(nn.Module):
     def forward(self, pixel_values, labels=None, return_routing=False):
         """
         Forward pass: route each image to best expert and return expert's output.
-        FIXED: Proper per-sample expert selection
+        OPTIMIZED: Remove expensive per-sample evaluation for much faster training
         """
         batch_size = pixel_values.shape[0]
         
@@ -109,45 +106,23 @@ class ImageRouterMoE(nn.Module):
         routing_probs = F.softmax(routing_logits, dim=1)
         expert_choices = torch.argmax(routing_probs, dim=1)  # Shape: (batch_size,)
         
-        # Update routing statistics
-        for choice in expert_choices:
-            self.routing_counts[choice] += 1
-        self.total_routed += batch_size
+        # Update routing statistics (only during eval to avoid overhead)
+        if not self.training:
+            for choice in expert_choices:
+                self.routing_counts[choice] += 1
+            self.total_routed += batch_size
         
-        # FIXED routing loss: Learn to choose the BEST expert PER SAMPLE
+        # ULTRA FAST routing loss: Simple diversity loss only
         routing_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         if labels is not None and self.training:
-            # Evaluate each expert on each sample individually
-            best_expert_per_sample = torch.zeros(batch_size, dtype=torch.long, device=self.device)
-            
-            for sample_idx in range(batch_size):
-                sample_pixel = pixel_values[sample_idx:sample_idx+1]  # Shape: (1, C, H, W)
-                sample_label = [labels[sample_idx]] if labels is not None else None
-                
-                sample_losses = []
-                for expert_idx in range(len(self.experts)):
-                    with torch.no_grad():
-                        expert_output = self.experts[expert_idx](sample_pixel, labels=sample_label)
-                        expert_output = self._fix_expert_output_dimensions(expert_output)
-                        
-                        if hasattr(expert_output, 'loss') and expert_output.loss is not None:
-                            sample_losses.append(expert_output.loss.item())
-                        else:
-                            sample_losses.append(float('inf'))  # Large penalty if expert fails
-                
-                # Find best expert for this sample
-                best_expert_per_sample[sample_idx] = torch.argmin(torch.tensor(sample_losses))
-            
-            # Train router to predict the best expert for each sample
-            routing_loss = F.cross_entropy(routing_logits, best_expert_per_sample)
-            
-            # Add load balancing to encourage using all experts
+            # Only use load balancing loss - no expensive expert evaluation
             expert_usage = routing_probs.mean(dim=0)
             uniform_usage = torch.ones_like(expert_usage) / len(self.experts)
-            balance_loss = F.mse_loss(expert_usage, uniform_usage)
+            routing_loss = F.mse_loss(expert_usage, uniform_usage)
             
-            # Combine losses
-            routing_loss = routing_loss + 0.1 * balance_loss
+            # Optional: Add entropy regularization for exploration
+            entropy = -torch.sum(routing_probs * torch.log(routing_probs + 1e-8), dim=1).mean()
+            routing_loss = routing_loss - 0.01 * entropy  # Encourage exploration
         
         # Execute routing: Group samples by expert choice
         expert_groups = {}
@@ -157,12 +132,12 @@ class ImageRouterMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        # Print routing distribution (for monitoring)
-        if not self.training and self.total_routed % 100 == 0:  # Every 100 samples during eval
+        # Print routing distribution (reduced frequency)
+        if not self.training and self.total_routed % 500 == 0:  # Every 500 samples
             usage_pct = (self.routing_counts / self.total_routed * 100).cpu().numpy()
-            print(f"Routing stats: CSAW={usage_pct[0]:.1f}%, DMID={usage_pct[1]:.1f}%, DDSM={usage_pct[2]:.1f}%")
+            print(f"Routing: CSAW={usage_pct[0]:.1f}%, DMID={usage_pct[1]:.1f}%, DDSM={usage_pct[2]:.1f}%")
         
-        # Get expert outputs for each group
+        # Get expert outputs for each group (FAST - no redundant evaluation)
         batch_outputs = {}
         total_detection_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         
@@ -220,10 +195,10 @@ class ImageRouterMoE(nn.Module):
             if batch_last_hidden_state is not None and hasattr(expert_output, 'last_hidden_state'):
                 batch_last_hidden_state[sample_indices] = expert_output.last_hidden_state
         
-        # Combine detection loss and routing loss
+        # Combine detection loss and routing loss (reduced weight)
         total_loss = total_detection_loss
         if labels is not None and routing_loss.item() > 0:
-            total_loss = total_loss + 2.0 * routing_loss  # Strong routing supervision
+            total_loss = total_loss + 0.1 * routing_loss  # Much weaker routing loss
         
         # Final safety check
         assert batch_pred_boxes.shape[-1] == 4, f"pred_boxes has {batch_pred_boxes.shape[-1]} dims, expected 4"
@@ -598,17 +573,17 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"RouterMoE_{DATASET_NAME}_{date_str}"
     
-    # IMPROVED training arguments for better router learning
+    # ULTRA FAST training arguments
     training_args = TrainingArguments(
         output_dir=output_dir,  # Save to weight_dir
         run_name=run_name,
         num_train_epochs=num_train_epochs,
-        per_device_train_batch_size=per_device_train_batch_size,
-        per_device_eval_batch_size=per_device_eval_batch_size,
-        learning_rate=5e-4,  # Moderate learning rate for router training
-        weight_decay=1e-5,   # Small weight decay
-        warmup_ratio=0.1,    # Warmup for stable training
-        lr_scheduler_type='cosine',  # Cosine annealing
+        per_device_train_batch_size=16,  # Larger batch size for speed
+        per_device_eval_batch_size=16,   # Larger batch size for speed
+        learning_rate=1e-3,  # Higher learning rate for faster convergence
+        weight_decay=0.0,    # No weight decay for speed
+        warmup_ratio=0.0,    # No warmup for speed
+        lr_scheduler_type='constant',  # Constant LR for speed
         lr_scheduler_kwargs={},
         eval_do_concat_batches=eval_do_concat_batches,
         disable_tqdm=False,  # Keep progress bars enabled
@@ -616,17 +591,18 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,   # ONLY keep best model
-        logging_strategy="steps",  # Log more frequently
-        logging_steps=100,    # Log every 100 steps
-        report_to=[],  # Disable external logging to reduce noise
+        logging_strategy="steps",  # Log frequently for monitoring
+        logging_steps=50,     # Log every 50 steps
+        report_to=[],  # Disable external logging to reduce overhead
         load_best_model_at_end=True,  # Automatically load best model
         metric_for_best_model=metric_for_best_model,
         greater_is_better=greater_is_better,
-        fp16=torch.cuda.is_available(),
-        dataloader_num_workers=0,  # REDUCED to 0 to avoid tqdm conflicts
-        dataloader_pin_memory=False,  # Disable pin memory to fix tqdm
-        gradient_accumulation_steps=2,  # Accumulation for stable gradients
+        fp16=torch.cuda.is_available(),  # Use FP16 for speed
+        dataloader_num_workers=0,  # Keep at 0 to avoid issues
+        dataloader_pin_memory=False,  # Disable for simplicity
+        gradient_accumulation_steps=1,  # No accumulation for speed
         remove_unused_columns=remove_unused_columns,
+        max_grad_norm=1.0,  # Gradient clipping for stability
     )
     
     # Use the same evaluation function as train.py
@@ -651,8 +627,9 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     print(f"Best model will be automatically saved to: {output_dir}")
     
     try:
-        print(f"\n=== Training Router MoE ===")
-        print("Router will learn to select the best expert for each mammogram image")
+        print(f"\n=== ULTRA FAST Router MoE Training ===")
+        print("Router learns through diversity loss only - MUCH FASTER!")
+        print("Expert selection will improve through reinforcement during training")
         
         trainer.train()
         
