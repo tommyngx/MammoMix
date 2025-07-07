@@ -380,7 +380,7 @@ def test_saved_moe_model(config_path, model_path, dataset=None, epoch=None, weig
     
     return test_results
 
-def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=None):
+def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=None, weight_moe=None):
     """Main training function following train.py structure exactly."""
     
     # If weight_moe2 is provided, only run testing
@@ -443,6 +443,43 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     
     # Create Router MoE model
     model = ImageRouterMoE(expert_models, device).to(device)
+    
+    # Load pretrained Router MoE weights if provided
+    if weight_moe is not None:
+        print(f"Loading pretrained Router MoE weights from: {weight_moe}")
+        
+        # Handle both directory and file paths
+        if os.path.isdir(weight_moe):
+            # Directory path - look for pytorch_model.bin or model.safetensors
+            pytorch_model_path = os.path.join(weight_moe, "pytorch_model.bin")
+            safetensors_path = os.path.join(weight_moe, "model.safetensors")
+            
+            if os.path.exists(pytorch_model_path):
+                model_file = pytorch_model_path
+                print(f"Loading from pytorch_model.bin: {model_file}")
+                model.load_state_dict(torch.load(model_file, map_location=device))
+            elif os.path.exists(safetensors_path):
+                model_file = safetensors_path
+                print(f"Loading from model.safetensors: {model_file}")
+                from safetensors.torch import load_file
+                state_dict = load_file(model_file)
+                model.load_state_dict(state_dict)
+            else:
+                raise FileNotFoundError(f"No model file found in directory: {weight_moe}")
+        else:
+            # Direct file path
+            print(f"Loading from file: {weight_moe}")
+            if weight_moe.endswith('.safetensors'):
+                from safetensors.torch import load_file
+                state_dict = load_file(weight_moe)
+                model.load_state_dict(state_dict)
+            else:
+                model.load_state_dict(torch.load(weight_moe, map_location=device))
+        
+        print("Pretrained Router MoE weights loaded successfully!")
+        print("Continuing training from pretrained checkpoint...")
+    else:
+        print("Training Router MoE from scratch...")
     
     # Load training arguments from config (exactly like train.py)
     training_cfg = config.get('training', {})
@@ -521,7 +558,11 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
         compute_metrics=eval_compute_metrics_fn,
     )
     
-    print(f"\n=== Training Router MoE ===")
+    if weight_moe is not None:
+        print(f"\n=== Continuing Router MoE Training from Checkpoint ===")
+    else:
+        print(f"\n=== Training Router MoE from Scratch ===")
+    
     print(f"Best model will be automatically saved to: {output_dir}")
     
     try:
@@ -565,6 +606,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', type=str, default=None, help='Dataset name to use (overrides config)')
     parser.add_argument('--weight_moe2', type=str, default=None, help='Path to saved Router MoE model for testing only')
     parser.add_argument('--weight_dir', type=str, default=None, help='Path to directory containing expert model weights (overrides config)')
+    parser.add_argument('--weight_moe', type=str, default=None, help='Path to pretrained Router MoE model to continue training from')
     args = parser.parse_args()
 
-    main(args.config, args.epoch, args.dataset, args.weight_moe2, args.weight_dir)
+    main(args.config, args.epoch, args.dataset, args.weight_moe2, args.weight_dir, args.weight_moe)
