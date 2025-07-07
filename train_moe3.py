@@ -207,8 +207,13 @@ class ImageRouterMoE(nn.Module):
             if labels is not None:
                 expert_labels = [labels[i] for i in sample_indices]
             
-            # Get expert output
-            with torch.no_grad():
+            # Get expert output - FIXED: Don't disable gradients completely for router fine-tuning
+            if self.freeze_router:
+                with torch.no_grad():
+                    expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
+                    expert_output = self._fix_expert_output_dimensions(expert_output)
+            else:
+                # Allow gradients for router fine-tuning
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
                 expert_output = self._fix_expert_output_dimensions(expert_output)
             
@@ -358,6 +363,26 @@ def evaluate_experts_on_data(expert_models, dataset, image_processor, device, sa
             pixel_values = batch['pixel_values'].to(device)
             labels = batch['labels']
             
+            # FIXED: Move labels to device properly
+            # Convert labels to proper format and move to device
+            if labels is not None:
+                processed_labels = []
+                for label in labels:
+                    if isinstance(label, dict):
+                        # Move each tensor in the label dict to device
+                        processed_label = {}
+                        for key, value in label.items():
+                            if torch.is_tensor(value):
+                                processed_label[key] = value.to(device)
+                            else:
+                                processed_label[key] = value
+                        processed_labels.append(processed_label)
+                    elif torch.is_tensor(label):
+                        processed_labels.append(label.to(device))
+                    else:
+                        processed_labels.append(label)
+                labels = processed_labels
+            
             batch_losses = []
             for expert_idx, expert in enumerate(expert_models):
                 try:
@@ -371,7 +396,7 @@ def evaluate_experts_on_data(expert_models, dataset, image_processor, device, sa
                     batch_losses.append(float('inf'))
             
             # Store best expert for each sample in batch
-            for i in range(len(labels)):
+            for i in range(len(labels) if labels else pixel_values.shape[0]):
                 sample_losses = [loss for loss in batch_losses]
                 best_expert = np.argmin(sample_losses)
                 expert_performances.append({
@@ -406,12 +431,101 @@ def create_routing_dataset_with_labels(config, image_processor, split, dataset_n
     
     return base_dataset, routing_labels
 
-def train_phase1_router(config, expert_models, device, dataset_name, epoch=None, weight_dir=None):
+def create_combined_dataset(config, image_processor, split, epoch=None):
+    """Create combined dataset from all 3 datasets (CSAW, DMID, DDSM)."""
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    
+    datasets = []
+    dataset_names = ['CSAW', 'DMID', 'DDSM']
+    
+    for dataset_name in dataset_names:
+        try:
+            dataset = BreastCancerDataset(
+                split=split,
+                splits_dir=SPLITS_DIR,
+                dataset_name=dataset_name,
+                image_processor=image_processor,
+                model_type=get_model_type(MODEL_NAME),
+                dataset_epoch=epoch
+            )
+            datasets.append(dataset)
+            print(f"{dataset_name} {split}: {len(dataset)} samples")
+        except Exception as e:
+            print(f"Warning: Could not load {dataset_name} {split}: {e}")
+    
+    # Combine all datasets
+    from torch.utils.data import ConcatDataset
+    combined_dataset = ConcatDataset(datasets)
+    print(f"Combined {split} dataset: {len(combined_dataset)} samples from {len(datasets)} datasets")
+    
+    return combined_dataset
+
+def evaluate_moe_with_router(router, expert_models, test_dataset, image_processor, device, epoch_num):
+    """Evaluate MoE with current router on test dataset."""
+    print(f"\n=== Evaluating MoE with Router (Epoch {epoch_num}) ===")
+    
+    # Create MoE model with current router
+    model = ImageRouterMoE(expert_models, router, device).to(device)
+    model.eval()
+    
+    # Setup evaluation
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"MoE3_Eval_Epoch{epoch_num}_{date_str}"
+    
+    training_args = TrainingArguments(
+        output_dir='./temp_eval_output',
+        run_name=run_name,
+        per_device_eval_batch_size=8,
+        eval_do_concat_batches=False,
+        disable_tqdm=False,
+        logging_dir="./logs",
+        eval_strategy="epoch",
+        save_strategy="no",  # Don't save during evaluation
+        logging_strategy="epoch",
+        report_to=[],  # Disable external loggers
+        fp16=False,
+        dataloader_num_workers=0,
+        remove_unused_columns=False,
+    )
+    
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        eval_dataset=test_dataset,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    # Evaluate
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    
+    # Print results
+    print(f"Epoch {epoch_num} Test Results:")
+    for key, value in test_results.items():
+        if isinstance(value, float):
+            print(f"  {key}: {value:.4f}")
+        else:
+            print(f"  {key}: {value}")
+    
+    # Print routing statistics
+    final_stats = model.get_routing_stats()
+    print(f"Routing distribution:")
+    for expert_name, usage in final_stats.items():
+        print(f"  {expert_name}: {usage*100:.1f}%")
+    
+    return test_results, final_stats
+
+def train_phase1_router(config, expert_models, device, epoch=None, weight_dir=None):
     """
-    Phase 1: Train router separately to learn data routing patterns.
+    Phase 1: Train router on COMBINED dataset from all 3 sources.
+    Evaluate MoE after each epoch.
     """
     print("\n" + "="*50)
-    print("PHASE 1: Training Data Router")
+    print("PHASE 1: Training Router on Combined Dataset")
     print("="*50)
     
     # Load datasets
@@ -421,42 +535,41 @@ def train_phase1_router(config, expert_models, device, dataset_name, epoch=None,
     # Get image processor
     image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
     
-    # Create base datasets
-    train_dataset = BreastCancerDataset(
-        split='train',
-        splits_dir=SPLITS_DIR,
-        dataset_name=dataset_name,
-        image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch
-    )
+    # Create COMBINED datasets from all 3 sources
+    print("Creating combined training dataset...")
+    train_dataset = create_combined_dataset(config, image_processor, 'train', epoch)
     
-    val_dataset = BreastCancerDataset(
-        split='val',
-        splits_dir=SPLITS_DIR,
-        dataset_name=dataset_name,
-        image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch
-    )
+    print("Creating combined validation dataset...")
+    val_dataset = create_combined_dataset(config, image_processor, 'val', epoch)
+    
+    print("Creating combined test dataset...")
+    test_dataset = create_combined_dataset(config, image_processor, 'test', epoch)
     
     # Evaluate experts to create routing labels
-    print("Creating routing labels for training data...")
-    train_performances = evaluate_experts_on_data(expert_models, train_dataset, image_processor, device, sample_size=500)
+    print("Creating routing labels for combined training data...")
+    train_performances = evaluate_experts_on_data(expert_models, train_dataset, image_processor, device, sample_size=1000)
     
-    print("Creating routing labels for validation data...")
-    val_performances = evaluate_experts_on_data(expert_models, val_dataset, image_processor, device, sample_size=200)
+    print("Creating routing labels for combined validation data...")
+    val_performances = evaluate_experts_on_data(expert_models, val_dataset, image_processor, device, sample_size=500)
     
-    # Create router datasets
-    train_routing_dataset, train_routing_labels = create_routing_dataset_with_labels(
-        config, image_processor, 'train', dataset_name, train_performances
-    )
-    val_routing_dataset, val_routing_labels = create_routing_dataset_with_labels(
-        config, image_processor, 'val', dataset_name, val_performances
-    )
+    # Create routing labels
+    train_routing_labels = []
+    for i in range(len(train_dataset)):
+        if i < len(train_performances):
+            train_routing_labels.append(train_performances[i]['best_expert'])
+        else:
+            train_routing_labels.append(0)  # Default
     
-    print(f"Router training data: {len(train_routing_dataset)} samples")
-    print(f"Router validation data: {len(val_routing_dataset)} samples")
+    val_routing_labels = []
+    for i in range(len(val_dataset)):
+        if i < len(val_performances):
+            val_routing_labels.append(val_performances[i]['best_expert'])
+        else:
+            val_routing_labels.append(0)  # Default
+    
+    print(f"Router training data: {len(train_dataset)} samples")
+    print(f"Router validation data: {len(val_dataset)} samples")
+    print(f"Router test data: {len(test_dataset)} samples")
     
     # Analyze expert distribution
     train_expert_counts = np.bincount(train_routing_labels[:len(train_performances)], minlength=3)
@@ -465,25 +578,26 @@ def train_phase1_router(config, expert_models, device, dataset_name, epoch=None,
     # Create router model
     router = DataRouter(num_experts=3, device=device).to(device)
     
-    # Custom training loop for router
+    # Training setup
     optimizer = torch.optim.AdamW(router.parameters(), lr=1e-4, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    num_epochs = epoch if epoch else 10
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     
-    # Training
-    router.train()
     best_val_acc = 0.0
-    patience = 3
-    patience_counter = 0
+    best_test_results = None
+    best_epoch = 0
     
-    for epoch_idx in range(10):  # Train for 10 epochs
-        print(f"\nRouter Epoch {epoch_idx + 1}/10")
+    # Training loop with evaluation after each epoch
+    for epoch_idx in range(num_epochs):
+        print(f"\n{'='*30} Epoch {epoch_idx + 1}/{num_epochs} {'='*30}")
         
-        # Training
+        # Training phase
+        router.train()
         train_loss = 0.0
         train_correct = 0
         train_total = 0
         
-        train_loader = DataLoader(train_routing_dataset, batch_size=16, shuffle=True, collate_fn=collate_fn)
+        train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, collate_fn=collate_fn)
         
         for batch_idx, batch in enumerate(tqdm(train_loader, desc="Training router")):
             pixel_values = batch['pixel_values'].to(device)
@@ -517,13 +631,13 @@ def train_phase1_router(config, expert_models, device, dataset_name, epoch=None,
         
         scheduler.step()
         
-        # Validation
+        # Validation phase
         router.eval()
         val_loss = 0.0
         val_correct = 0
         val_total = 0
         
-        val_loader = DataLoader(val_routing_dataset, batch_size=16, shuffle=False, collate_fn=collate_fn)
+        val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, collate_fn=collate_fn)
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(tqdm(val_loader, desc="Validating router")):
@@ -556,158 +670,56 @@ def train_phase1_router(config, expert_models, device, dataset_name, epoch=None,
         print(f"Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.4f}")
         print(f"Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.4f}")
         
-        # Save best model
+        # EVALUATE MoE WITH CURRENT ROUTER ON TEST SET
+        test_results, routing_stats = evaluate_moe_with_router(
+            router, expert_models, test_dataset, image_processor, device, epoch_idx + 1
+        )
+        
+        # Save router after each epoch
+        router_save_path = os.path.join(weight_dir, f'router_combined_epoch{epoch_idx+1}')
+        os.makedirs(router_save_path, exist_ok=True)
+        torch.save(router.state_dict(), os.path.join(router_save_path, 'router.pth'))
+        print(f"Router epoch {epoch_idx+1} saved to {router_save_path}")
+        
+        # Track best model
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            patience_counter = 0
+            best_test_results = test_results
+            best_epoch = epoch_idx + 1
             
-            # Save router
-            router_save_path = os.path.join(weight_dir, f'router_{dataset_name}')
-            os.makedirs(router_save_path, exist_ok=True)
-            torch.save(router.state_dict(), os.path.join(router_save_path, 'router.pth'))
-            print(f"Best router saved to {router_save_path}")
+            # Save best router
+            best_router_path = os.path.join(weight_dir, 'router_combined_best')
+            os.makedirs(best_router_path, exist_ok=True)
+            torch.save(router.state_dict(), os.path.join(best_router_path, 'router.pth'))
+            print(f"Best router saved to {best_router_path}")
+    
+    print(f"\n{'='*50}")
+    print("PHASE 1 TRAINING COMPLETE!")
+    print(f"Best router validation accuracy: {best_val_acc:.4f} (Epoch {best_epoch})")
+    print(f"Best test results:")
+    for key, value in best_test_results.items():
+        if isinstance(value, float):
+            print(f"  {key}: {value:.4f}")
         else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print("Early stopping triggered")
-                break
-        
-        router.train()
+            print(f"  {key}: {value}")
+    print(f"{'='*50}")
     
     # Load best router
-    router_load_path = os.path.join(weight_dir, f'router_{dataset_name}', 'router.pth')
-    router.load_state_dict(torch.load(router_load_path, map_location=device))
+    best_router_path = os.path.join(weight_dir, 'router_combined_best', 'router.pth')
+    router.load_state_dict(torch.load(best_router_path, map_location=device))
     router.eval()
-    
-    print(f"\nPhase 1 Complete! Best router accuracy: {best_val_acc:.4f}")
-    print(f"Router saved to: {router_load_path}")
     
     return router
 
-def train_phase2_moe(config, expert_models, pretrained_router, device, dataset_name, epoch=None, weight_dir=None):
-    """
-    Phase 2: Train MoE with pretrained router.
-    """
-    print("\n" + "="*50)
-    print("PHASE 2: Training MoE with Pretrained Router")
-    print("="*50)
-    
-    # Create MoE model
-    model = ImageRouterMoE(expert_models, pretrained_router, device).to(device)
-    
-    # Load datasets
-    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
-    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
-    
-    image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
-    
-    train_dataset = BreastCancerDataset(
-        split='train',
-        splits_dir=SPLITS_DIR,
-        dataset_name=dataset_name,
-        image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch
-    )
-    
-    val_dataset = BreastCancerDataset(
-        split='val',
-        splits_dir=SPLITS_DIR,
-        dataset_name=dataset_name,
-        image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch
-    )
-    
-    print(f'Train dataset: {len(train_dataset)} samples')
-    print(f'Val dataset: {len(val_dataset)} samples')
-    
-    # Training configuration
-    output_dir = os.path.join(weight_dir, f'moe3_{dataset_name}')
-    os.makedirs(output_dir, exist_ok=True)
-    
-    date_str = datetime.datetime.now().strftime("%d%m%y")
-    run_name = f"MoE3_{dataset_name}_{date_str}"
-    
-    training_args = TrainingArguments(
-        output_dir=output_dir,
-        run_name=run_name,
-        num_train_epochs=epoch if epoch else 5,  # Shorter training since router is pretrained
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        learning_rate=1e-5,  # Lower learning rate for fine-tuning
-        weight_decay=1e-4,
-        warmup_ratio=0.1,
-        lr_scheduler_type='cosine',
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=1,
-        logging_strategy="steps",
-        logging_steps=50,
-        report_to=[],
-        load_best_model_at_end=True,
-        metric_for_best_model='eval_map_50',
-        greater_is_better=True,
-        fp16=False,
-        dataloader_num_workers=0,
-        gradient_accumulation_steps=2,
-        remove_unused_columns=False,
-        save_safetensors=True,
-    )
-    
-    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
-    
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        processing_class=image_processor,
-        data_collator=collate_fn,
-        compute_metrics=eval_compute_metrics_fn,
-    )
-    
-    print("Training Phase 2 MoE...")
-    trainer.train()
-    
-    # Test evaluation
-    print("\n=== Evaluating on test dataset ===")
-    test_dataset = BreastCancerDataset(
-        split='test',
-        splits_dir=SPLITS_DIR,
-        dataset_name=dataset_name,
-        image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch
-    )
-    
-    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
-    
-    print("\n=== Test Results ===")
-    for key, value in test_results.items():
-        if isinstance(value, float):
-            print(f"{key}: {value:.4f}")
-        else:
-            print(f"{key}: {value}")
-    
-    # Print final routing statistics
-    print("\n=== Final Routing Statistics ===")
-    final_stats = model.get_routing_stats()
-    for expert_name, usage in final_stats.items():
-        print(f"{expert_name}: {usage*100:.1f}%")
-    
-    return model, test_results
-
 def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
     """
-    Main function with 2-phase training:
-    Phase 1: Train router to learn data routing patterns
-    Phase 2: Use pretrained router in MoE training
+    Main function:
+    Phase 1: Train router on COMBINED dataset and evaluate MoE after each epoch
+    Phase 2: Just load best router and show final results (no training)
     """
     config = load_config(config_path)
     
     # Configuration
-    DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     if weight_dir is not None:
@@ -719,47 +731,58 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
         raise ValueError(f"Expert weights directory not found: {expert_weights_dir}")
     
     print(f"Using device: {device}")
-    print(f"Dataset: {DATASET_NAME}")
+    print(f"Training on COMBINED dataset from all 3 sources")
     print(f"Expert weights: {expert_weights_dir}")
     
     # Load expert models
     expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     
     if phase == "1" or phase is None:
-        # Phase 1: Train router
-        router = train_phase1_router(config, expert_models, device, DATASET_NAME, epoch, expert_weights_dir)
+        # Phase 1: Train router on combined data with evaluation after each epoch
+        router = train_phase1_router(config, expert_models, device, epoch, expert_weights_dir)
         
         if phase == "1":
-            print("Phase 1 completed. Run with --phase 2 to continue to MoE training.")
+            print("Phase 1 completed. Router trained on combined dataset.")
             return
     
     if phase == "2" or phase is None:
-        # Phase 2: Load router and train MoE
-        router_path = os.path.join(expert_weights_dir, f'router_{DATASET_NAME}', 'router.pth')
+        # Phase 2: Load best router and show final results
+        print("\n" + "="*50)
+        print("PHASE 2: Final Evaluation with Best Router")
+        print("="*50)
         
-        if not os.path.exists(router_path):
-            raise FileNotFoundError(f"Router not found at {router_path}. Run Phase 1 first.")
+        best_router_path = os.path.join(expert_weights_dir, 'router_combined_best', 'router.pth')
         
-        # Load pretrained router
+        if not os.path.exists(best_router_path):
+            raise FileNotFoundError(f"Best router not found at {best_router_path}. Run Phase 1 first.")
+        
+        # Load best router
         router = DataRouter(num_experts=3, device=device).to(device)
-        router.load_state_dict(torch.load(router_path, map_location=device))
+        router.load_state_dict(torch.load(best_router_path, map_location=device))
         router.eval()
-        print(f"Loaded pretrained router from: {router_path}")
+        print(f"Loaded best router from: {best_router_path}")
         
-        # Train MoE
-        model, test_results = train_phase2_moe(config, expert_models, router, device, DATASET_NAME, epoch, expert_weights_dir)
+        # Create test dataset
+        SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+        MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+        image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+        
+        test_dataset = create_combined_dataset(config, image_processor, 'test', epoch)
+        
+        # Final evaluation
+        test_results, routing_stats = evaluate_moe_with_router(
+            router, expert_models, test_dataset, image_processor, device, "FINAL"
+        )
+        
+        print(f"\n{'='*50}")
+        print("FINAL RESULTS WITH BEST ROUTER:")
+        for key, value in test_results.items():
+            if isinstance(value, float):
+                print(f"  {key}: {value:.4f}")
+            else:
+                print(f"  {key}: {value}")
+        print(f"{'='*50}")
     
     print("\n" + "="*50)
-    print("2-PHASE TRAINING COMPLETE!")
+    print("TRAINING AND EVALUATION COMPLETE!")
     print("="*50)
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
-    parser.add_argument('--epoch', type=int, default=None, help='Number of epochs')
-    parser.add_argument('--dataset', type=str, default=None, help='Dataset name')
-    parser.add_argument('--weight_dir', type=str, default=None, help='Expert weights directory')
-    parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase (1: router only, 2: MoE only, None: both)')
-    args = parser.parse_args()
-
-    main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase)
