@@ -448,7 +448,7 @@ def main(config_path, epoch=None, dataset=None, weight_moe2=None, weight_dir=Non
     training_cfg = config.get('training', {})
     
     # SAVE TO WEIGHT_DIR: Use expert_weights_dir as base output directory
-    output_dir = os.path.join(expert_weights_dir, f'router_moe_{DATASET_NAME}')
+    output_dir = os.path.join(expert_weights_dir, f'moe_{DATASET_NAME}')
     os.makedirs(output_dir, exist_ok=True)
     
     num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
