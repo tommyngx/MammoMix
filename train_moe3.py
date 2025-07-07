@@ -711,78 +711,127 @@ def train_phase1_router(config, expert_models, device, epoch=None, weight_dir=No
     
     return router
 
-def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None):
+def train_phase2_moe(config, expert_models, pretrained_router, device, dataset_name, epoch=None, weight_dir=None):
     """
-    Main function:
-    Phase 1: Train router on COMBINED dataset and evaluate MoE after each epoch
-    Phase 2: Just load best router and show final results (no training)
+    Phase 2: Train MoE with pretrained router.
     """
-    config = load_config(config_path)
-    
-    # Configuration
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    if weight_dir is not None:
-        expert_weights_dir = weight_dir
-    else:
-        expert_weights_dir = config.get('moe', {}).get('expert_weights_dir', '/content/Weights')
-    
-    if not os.path.exists(expert_weights_dir):
-        raise ValueError(f"Expert weights directory not found: {expert_weights_dir}")
-    
-    print(f"Using device: {device}")
-    print(f"Training on COMBINED dataset from all 3 sources")
-    print(f"Expert weights: {expert_weights_dir}")
-    
-    # Load expert models
-    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
-    
-    if phase == "1" or phase is None:
-        # Phase 1: Train router on combined data with evaluation after each epoch
-        router = train_phase1_router(config, expert_models, device, epoch, expert_weights_dir)
-        
-        if phase == "1":
-            print("Phase 1 completed. Router trained on combined dataset.")
-            return
-    
-    if phase == "2" or phase is None:
-        # Phase 2: Load best router and show final results
-        print("\n" + "="*50)
-        print("PHASE 2: Final Evaluation with Best Router")
-        print("="*50)
-        
-        best_router_path = os.path.join(expert_weights_dir, 'router_combined_best', 'router.pth')
-        
-        if not os.path.exists(best_router_path):
-            raise FileNotFoundError(f"Best router not found at {best_router_path}. Run Phase 1 first.")
-        
-        # Load best router
-        router = DataRouter(num_experts=3, device=device).to(device)
-        router.load_state_dict(torch.load(best_router_path, map_location=device))
-        router.eval()
-        print(f"Loaded best router from: {best_router_path}")
-        
-        # Create test dataset
-        SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
-        MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
-        image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
-        
-        test_dataset = create_combined_dataset(config, image_processor, 'test', epoch)
-        
-        # Final evaluation
-        test_results, routing_stats = evaluate_moe_with_router(
-            router, expert_models, test_dataset, image_processor, device, "FINAL"
-        )
-        
-        print(f"\n{'='*50}")
-        print("FINAL RESULTS WITH BEST ROUTER:")
-        for key, value in test_results.items():
-            if isinstance(value, float):
-                print(f"  {key}: {value:.4f}")
-            else:
-                print(f"  {key}: {value}")
-        print(f"{'='*50}")
-    
     print("\n" + "="*50)
-    print("TRAINING AND EVALUATION COMPLETE!")
+    print("PHASE 2: Training MoE with Pretrained Router")
     print("="*50)
+    
+    # Create MoE model
+    model = ImageRouterMoE(expert_models, pretrained_router, device).to(device)
+    
+    # Load datasets
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    
+    image_processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+    
+    train_dataset = BreastCancerDataset(
+        split='train',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
+    
+    val_dataset = BreastCancerDataset(
+        split='val',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
+    
+    print(f'Train dataset: {len(train_dataset)} samples')
+    print(f'Val dataset: {len(val_dataset)} samples')
+    
+    # Training configuration
+    output_dir = os.path.join(weight_dir, f'moe3_{dataset_name}')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    date_str = datetime.datetime.now().strftime("%d%m%y")
+    run_name = f"MoE3_{dataset_name}_{date_str}"
+    
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        run_name=run_name,
+        num_train_epochs=epoch if epoch else 5,  # Shorter training since router is pretrained
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        learning_rate=1e-5,  # Lower learning rate for fine-tuning
+        weight_decay=1e-4,
+        warmup_ratio=0.1,
+        lr_scheduler_type='cosine',
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=1,
+        logging_strategy="steps",
+        logging_steps=50,
+        report_to=[],
+        load_best_model_at_end=True,
+        metric_for_best_model='eval_map_50',
+        greater_is_better=True,
+        fp16=False,
+        dataloader_num_workers=0,
+        gradient_accumulation_steps=2,
+        remove_unused_columns=False,
+        save_safetensors=True,
+    )
+    
+    eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
+    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        processing_class=image_processor,
+        data_collator=collate_fn,
+        compute_metrics=eval_compute_metrics_fn,
+    )
+    
+    print("Training Phase 2 MoE...")
+    trainer.train()
+    
+    # Test evaluation
+    print("\n=== Evaluating on test dataset ===")
+    test_dataset = BreastCancerDataset(
+        split='test',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+        dataset_epoch=epoch
+    )
+    
+    test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+    
+    print("\n=== Test Results ===")
+    for key, value in test_results.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+    
+    # Print final routing statistics
+    print("\n=== Final Routing Statistics ===")
+    final_stats = model.get_routing_stats()
+    for expert_name, usage in final_stats.items():
+        print(f"{expert_name}: {usage*100:.1f}%")
+    
+    return model, test_results
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='configs/train_config.yaml', help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, help='Number of epochs')
+    parser.add_argument('--dataset', type=str, default=None, help='Dataset name')
+    parser.add_argument('--weight_dir', type=str, default=None, help='Expert weights directory')
+    parser.add_argument('--phase', type=str, choices=['1', '2'], default=None, help='Training phase (1: router only, 2: MoE only, None: both)')
+    args = parser.parse_args()
+
+    main(args.config, args.epoch, args.dataset, args.weight_dir, args.phase)
