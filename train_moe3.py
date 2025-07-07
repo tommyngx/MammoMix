@@ -468,7 +468,7 @@ def evaluate_simple_moe(config, device, dataset_name, expert_weights_dir):
     expert_idx = dataset_map[dataset_name]
     individual_expert = expert_models[expert_idx]
     
-    # Get all metrics for both models using consistent function
+    # Get all metrics for both models using consistent code
     print(f"\n=== Evaluating Individual {dataset_name} Expert ===")
     individual_metrics = get_all_metrics(
         individual_expert, test_dataset, image_processor, device, f"Individual_{dataset_name}"
@@ -502,9 +502,8 @@ def evaluate_simple_moe(config, device, dataset_name, expert_weights_dir):
     else:
         print(f"   Routing quality: ⚠️ Poor (<80%)")
     
-    # Save SimpleMoE model in standard format
-    model_save_dir = os.path.join(expert_weights_dir, f'simple_moe_{dataset_name}')
-    save_simple_moe_model(moe_model, image_processor, model_save_dir)
+    # Save SimpleMoE model in standard format - ALWAYS use moe_MOMO folder
+    save_simple_moe_model(moe_model, image_processor, moe_save_dir)
     
     return moe_metrics, final_stats, moe_model
 
