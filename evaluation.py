@@ -62,34 +62,34 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
             post_processed_targets.append({'boxes': boxes, 'labels': labels})
     
     for batch_idx, (batch, target_sizes) in enumerate(zip(predictions, image_sizes)):
-        print(f"[EVAL DEBUG] Processing batch {batch_idx}")
+        #print(f"[EVAL DEBUG] Processing batch {batch_idx}")
         
         # DEBUG: Check what's in the batch
-        print(f"[EVAL DEBUG] Batch type: {type(batch)}")
-        print(f"[EVAL DEBUG] Batch length: {len(batch) if hasattr(batch, '__len__') else 'no len'}")
+        #print(f"[EVAL DEBUG] Batch type: {type(batch)}")
+        #print(f"[EVAL DEBUG] Batch length: {len(batch) if hasattr(batch, '__len__') else 'no len'}")
         
         if len(batch) >= 3:
             batch_logits, batch_boxes = batch[1], batch[2]
-            print(f"[EVAL DEBUG] batch_logits type: {type(batch_logits)}")
-            print(f"[EVAL DEBUG] batch_boxes type: {type(batch_boxes)}")
+            #print(f"[EVAL DEBUG] batch_logits type: {type(batch_logits)}")
+            #print(f"[EVAL DEBUG] batch_boxes type: {type(batch_boxes)}")
             
             if hasattr(batch_boxes, 'shape'):
-                print(f"[EVAL DEBUG] batch_boxes shape: {batch_boxes.shape}")
+                #print(f"[EVAL DEBUG] batch_boxes shape: {batch_boxes.shape}")
             elif isinstance(batch_boxes, (list, np.ndarray)):
-                print(f"[EVAL DEBUG] batch_boxes array shape: {np.array(batch_boxes).shape}")
+                #print(f"[EVAL DEBUG] batch_boxes array shape: {np.array(batch_boxes).shape}")
             
             # Check if batch[2] is actually last_hidden_state instead of pred_boxes
             if hasattr(batch_boxes, 'shape') and len(batch_boxes.shape) >= 2 and batch_boxes.shape[-1] == 768:
-                print(f"[EVAL DEBUG] WARNING: batch[2] seems to be last_hidden_state (768 dims), not pred_boxes!")
+                #print(f"[EVAL DEBUG] WARNING: batch[2] seems to be last_hidden_state (768 dims), not pred_boxes!")
                 
                 # Try to find pred_boxes in other batch positions
                 for i, item in enumerate(batch):
                     if hasattr(item, 'shape') and len(item.shape) >= 2 and item.shape[-1] == 4:
-                        print(f"[EVAL DEBUG] Found 4D tensor at batch[{i}]: {item.shape}")
+                        #print(f"[EVAL DEBUG] Found 4D tensor at batch[{i}]: {item.shape}")
                         batch_boxes = item
                         break
                 else:
-                    print(f"[EVAL DEBUG] No 4D tensor found in batch, using emergency fallback")
+                    #print(f"[EVAL DEBUG] No 4D tensor found in batch, using emergency fallback")
                     # Emergency fallback: create dummy boxes
                     if hasattr(batch_boxes, 'shape'):
                         batch_size, num_queries = batch_boxes.shape[0], batch_boxes.shape[1]
@@ -98,7 +98,7 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
         # CRITICAL FIX: Ensure batch_boxes is exactly 4D
         batch_boxes_tensor = torch.tensor(batch_boxes)
         if batch_boxes_tensor.shape[-1] != 4:
-            print(f"EVAL FIX: batch_boxes has {batch_boxes_tensor.shape[-1]} dims, forcing to 4")
+            #print(f"EVAL FIX: batch_boxes has {batch_boxes_tensor.shape[-1]} dims, forcing to 4")
             batch_boxes_tensor = batch_boxes_tensor[..., :4]
         
         output = ModelOutput(logits=torch.tensor(batch_logits), pred_boxes=batch_boxes_tensor)
@@ -109,8 +109,8 @@ def compute_metrics(evaluation_results, image_processor, threshold=0.0, id2label
             )
             post_processed_predictions.extend(post_processed_output)
         except Exception as e:
-            print(f"ERROR in evaluation batch {batch_idx}: {e}")
-            print(f"pred_boxes shape: {output.pred_boxes.shape}")
+            #print(f"ERROR in evaluation batch {batch_idx}: {e}")
+            #print(f"pred_boxes shape: {output.pred_boxes.shape}")
             raise e
 
     metrics = mean_average_precision(post_processed_predictions, post_processed_targets)
