@@ -51,6 +51,14 @@ try:
 except ImportError:
     SimpleMoEModel = None
 
+# Import SimpleMoE classes from train_moe3.py
+try:
+    from train_moe3 import SimpleMoE, SimpleDatasetClassifier, load_expert_models
+except ImportError:
+    SimpleMoE = None
+    SimpleDatasetClassifier = None
+    load_expert_models = None
+
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn, run_model_inference_with_map
@@ -109,42 +117,39 @@ def load_model_safe(model_dir, device):
         model_type = config.get('model_type', '')
         
         if model_type == 'simple_moe' or 'moe' in str(model_dir).lower():
-            print(f"Detected MoE model, loading with custom loader: {model_dir}")
-            # Try multiple ways to load MoE model
+            print(f"Detected SimpleMoE model, loading with custom loader: {model_dir}")
             
-            # Method 1: Try custom SimpleMoEModel if available
-            if SimpleMoEModel is not None:
+            if SimpleMoE is not None and SimpleDatasetClassifier is not None and load_expert_models is not None:
                 try:
-                    model = SimpleMoEModel.from_pretrained(str(model_dir))
-                    return model.to(device)
+                    # Load expert models from parent directory (same as train_moe3.py)
+                    expert_weights_dir = model_dir.parent
+                    expert_models, expert_processors = load_expert_models(str(expert_weights_dir), device)
+                    
+                    # Load trained classifier
+                    classifier_path = model_dir / 'classifier_best.pth'
+                    if not classifier_path.exists():
+                        classifier_path = model_dir / 'classifier_final.pth'
+                    
+                    if not classifier_path.exists():
+                        raise FileNotFoundError(f"No classifier found in {model_dir}")
+                    
+                    # Initialize and load classifier
+                    classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
+                    classifier.load_state_dict(torch.load(classifier_path, map_location=device))
+                    classifier.eval()
+                    
+                    # Create SimpleMoE model
+                    moe_model = SimpleMoE(expert_models, classifier, device).to(device)
+                    moe_model.eval()
+                    
+                    print(f"Successfully loaded SimpleMoE model from {model_dir}")
+                    return moe_model
+                    
                 except Exception as e:
-                    print(f"SimpleMoEModel loading failed: {e}")
-            
-            # Method 2: Try loading with torch.load
-            try:
-                pytorch_model_path = model_dir / "pytorch_model.bin"
-                if pytorch_model_path.exists():
-                    state_dict = torch.load(pytorch_model_path, map_location=device)
-                    # You may need to instantiate the model architecture here
-                    # based on how train_moe3.py does it
-                    print("Loaded MoE model state dict successfully")
-                    # This would need the model architecture to be defined
-                    # model = YourMoEModelClass(config)
-                    # model.load_state_dict(state_dict)
-                    # return model.to(device)
-                except Exception as e:
-                    print(f"PyTorch model loading failed: {e}")
-            
-            # Method 3: Try loading as safetensors
-            try:
-                safetensors_path = model_dir / "model.safetensors"
-                if safetensors_path.exists():
-                    from safetensors.torch import load_file
-                    state_dict = load_file(safetensors_path)
-                    # Same issue - need model architecture
-                    print("Loaded MoE model from safetensors")
-                except Exception as e:
-                    print(f"Safetensors loading failed: {e}")
+                    print(f"SimpleMoE loading failed: {e}")
+                    # Fall through to standard loading
+            else:
+                print("SimpleMoE classes not available, falling back to standard loading")
     
     # Fallback to standard transformers loading
     try:
