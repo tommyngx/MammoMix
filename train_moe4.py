@@ -26,21 +26,22 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from transformers import (
     AutoImageProcessor,
     AutoModelForObjectDetection,
-    TrainingArguments,
-    Trainer,
-    EarlyStoppingCallback,
 )
 
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
-from evaluation import get_eval_compute_metrics_fn, run_model_inference_with_map
+from evaluation import run_model_inference_with_map
 import pandas as pd
 
-def load_config(config_path):
-    """Load configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+# Import reusable functions from train_moe3.py
+from train_moe3 import (
+    SimpleDatasetClassifier,
+    SimpleMoE,
+    load_expert_models,
+    save_simple_moe_model,
+    get_all_metrics,
+    print_metrics_comparison
+)
 
 class BoundingBoxCalibrationLayer(nn.Module):
     """Calibration layer to refine bounding box predictions."""
@@ -200,7 +201,7 @@ def load_pretrained_moe(expert_weights_dir, device):
     """Load pre-trained MoE model directly from saved checkpoint."""
     moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
     
-    # Check for saved MoE model files
+    # First try to load from the saved MoE model
     saved_moe_path = None
     for filename in ['model.safetensors', 'pytorch_model.bin']:
         potential_path = os.path.join(moe_save_dir, filename)
@@ -226,9 +227,32 @@ def load_pretrained_moe(expert_weights_dir, device):
             
         except Exception as e:
             print(f"Failed to load saved MoE: {e}")
-            raise FileNotFoundError(f"Cannot load MoE model from {saved_moe_path}. Please ensure the model exists.")
-    else:
-        raise FileNotFoundError(f"No MoE model found in {moe_save_dir}. Please run train_moe3.py first.")
+            print("Falling back to expert models...")
+    
+    # Fallback: Load expert models and create MoE (reuse from train_moe3.py)
+    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
+    image_processor = expert_processors[0]
+    
+    # Load trained classifier
+    classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
+    
+    if not os.path.exists(classifier_path):
+        classifier_final_path = os.path.join(moe_save_dir, 'classifier_final.pth')
+        if os.path.exists(classifier_final_path):
+            classifier_path = classifier_final_path
+        else:
+            raise FileNotFoundError(f"No classifier found in {moe_save_dir}. Run train_moe3.py first.")
+    
+    # Initialize and load classifier (reuse from train_moe3.py)
+    classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
+    classifier.load_state_dict(torch.load(classifier_path, map_location=device))
+    classifier.eval()
+    
+    # Create MoE model (reuse from train_moe3.py)
+    moe_model = SimpleMoE(expert_models, classifier, device).to(device)
+    moe_model.eval()
+    
+    return moe_model, image_processor
 
 def create_calibration_dataset(config, image_processor, device, dataset_name):
     """Create dataset for calibration training using only the specified dataset."""
@@ -261,15 +285,20 @@ def compute_calibration_loss(pred_boxes, pred_logits, target_labels, device):
     # Box regression loss (only for positive targets)
     for i, labels in enumerate(target_labels):
         if labels and len(labels) > 0:
-            target_boxes = torch.stack([torch.tensor(label['boxes'], device=device) for label in labels])
-            target_classes = torch.tensor([label['class_labels'] for label in labels], device=device)
-            
-            # Simple L1 loss for box refinement
-            if len(target_boxes) > 0:
-                # Take first few predictions that match number of targets
-                num_targets = min(len(target_boxes), pred_boxes.shape[1])
-                box_loss = F.l1_loss(pred_boxes[i, :num_targets], target_boxes[:num_targets])
-                total_loss = total_loss + box_loss
+            try:
+                target_boxes = torch.stack([torch.tensor(label['boxes'], device=device, dtype=torch.float32) for label in labels])
+                target_classes = torch.tensor([label['class_labels'] for label in labels], device=device)
+                
+                # Simple L1 loss for box refinement
+                if len(target_boxes) > 0:
+                    # Take first few predictions that match number of targets
+                    num_targets = min(len(target_boxes), pred_boxes.shape[1])
+                    if num_targets > 0:
+                        box_loss = F.l1_loss(pred_boxes[i, :num_targets], target_boxes[:num_targets])
+                        total_loss = total_loss + box_loss
+            except Exception as e:
+                # Skip problematic samples
+                continue
     
     return total_loss
 
@@ -391,6 +420,9 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
     print(f"Save directory: {calibrated_save_dir}")
     print(f"Training dataset: {dataset_name}")
     print(f"Only training calibration layer parameters: {sum(p.numel() for p in calibrated_model.calibration.parameters()):,}")
+    
+    calibration_path = None
+    complete_model_path = None
     
     for epoch in range(epochs):
         # Training phase
@@ -539,15 +571,17 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
     print("CALIBRATION TRAINING COMPLETED!")
     print(f"Best validation loss: {best_val_loss:.4f}")
     print(f"Dataset: {dataset_name}")
-    print(f"Calibration layer saved to: {calibration_path}")
-    print(f"Complete model saved to: {complete_model_path}")
+    if calibration_path:
+        print(f"Calibration layer saved to: {calibration_path}")
+    if complete_model_path:
+        print(f"Complete model saved to: {complete_model_path}")
     print(f"Standard format saved to: {final_standard_dir}")
     print("="*60)
     
     return calibrated_model, best_val_loss
 
 def evaluate_calibrated_moe(config, device, dataset_name, expert_weights_dir):
-    """Evaluate calibrated MoE and compare with original MoE."""
+    """Evaluate calibrated MoE and compare with original MoE using reusable functions."""
     print(f"="*60)
     print(f"EVALUATING CALIBRATED MOE ON {dataset_name}")
     print("="*60)
@@ -586,42 +620,25 @@ def evaluate_calibrated_moe(config, device, dataset_name, expert_weights_dir):
     
     print(f"Test dataset: {len(test_dataset)} samples")
     
-    # Evaluate both models
-    from evaluation import run_model_inference_with_map
-    
+    # Evaluate both models using reusable function from train_moe3.py
     print(f"\n=== Evaluating Original MoE ===")
-    original_metrics = run_model_inference_with_map(original_moe, test_dataset, image_processor, device)
+    original_metrics = get_all_metrics(original_moe, test_dataset, image_processor, device, f"Original_MoE_{dataset_name}")
     
     print(f"\n=== Evaluating Calibrated MoE ===")
-    calibrated_metrics = run_model_inference_with_map(calibrated_moe, test_dataset, image_processor, device)
+    calibrated_metrics = get_all_metrics(calibrated_moe, test_dataset, image_processor, device, f"Calibrated_MoE_{dataset_name}")
     
-    # Compare results
-    print(f"\n" + "="*80)
-    print(f"CALIBRATION RESULTS COMPARISON - {dataset_name}")
-    print("="*80)
-    
-    comparison_data = []
-    for metric in ['map', 'map_50', 'map_75', 'map_small', 'map_medium', 'map_large']:
-        original_val = original_metrics.get(metric, 0.0)
-        calibrated_val = calibrated_metrics.get(metric, 0.0)
-        improvement = calibrated_val - original_val
-        improvement_pct = (improvement / original_val * 100) if original_val > 0 else 0.0
-        
-        comparison_data.append({
-            'Metric': metric,
-            'Original_MoE': f"{original_val:.4f}",
-            'Calibrated_MoE': f"{calibrated_val:.4f}",
-            'Improvement': f"{improvement:.4f}",
-            'Improvement_%': f"{improvement_pct:.2f}%"
-        })
-    
-    df = pd.DataFrame(comparison_data)
-    print(df.to_string(index=False))
+    # Compare results using reusable function from train_moe3.py
+    print_metrics_comparison(original_metrics, calibrated_metrics, f"Original_vs_Calibrated_{dataset_name}")
     
     # Summary
-    map50_improvement = calibrated_metrics.get('map_50', 0) - original_metrics.get('map_50', 0)
-    print(f"\n📊 Summary:")
-    print(f"   mAP@50 improvement: {map50_improvement:.4f}")
+    original_map50 = original_metrics.get('test_map_50', 0.0)
+    calibrated_map50 = calibrated_metrics.get('test_map_50', 0.0)
+    map50_improvement = calibrated_map50 - original_map50
+    
+    print(f"\n📊 Calibration Summary:")
+    print(f"   Original mAP@50: {original_map50:.4f}")
+    print(f"   Calibrated mAP@50: {calibrated_map50:.4f}")
+    print(f"   Improvement: {map50_improvement:.4f}")
     
     if map50_improvement > 0.01:
         print(f"   Status: ✅ Significant improvement with calibration")
