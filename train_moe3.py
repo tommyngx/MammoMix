@@ -519,6 +519,229 @@ def test_only_mode(config, device, dataset_name, expert_weights_dir):
         print(f"Evaluation failed: {e}")
         return {'error': str(e)}
 
+def create_classifier_dataset(expert_weights_dir, config, device):
+    """Create dataset for training the classifier."""
+    SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
+    MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
+    
+    # Load any image processor (they should be the same)
+    first_expert_path = os.path.join(expert_weights_dir, 'yolos_CSAW')
+    image_processor = AutoImageProcessor.from_pretrained(first_expert_path)
+    
+    datasets = []
+    labels = []
+    dataset_names = ['CSAW', 'DMID', 'DDSM']
+    
+    for idx, dataset_name in enumerate(dataset_names):
+        print(f"Loading {dataset_name} dataset...")
+        
+        train_dataset = BreastCancerDataset(
+            split='train',
+            splits_dir=SPLITS_DIR,
+            dataset_name=dataset_name,
+            image_processor=image_processor,
+            model_type=get_model_type(MODEL_NAME),
+        )
+        
+        val_dataset = BreastCancerDataset(
+            split='val',
+            splits_dir=SPLITS_DIR,
+            dataset_name=dataset_name,
+            image_processor=image_processor,
+            model_type=get_model_type(MODEL_NAME),
+        )
+        
+        # Combine train and val for classifier training
+        combined_dataset = torch.utils.data.ConcatDataset([train_dataset, val_dataset])
+        datasets.append(combined_dataset)
+        labels.extend([idx] * len(combined_dataset))
+        
+        print(f"  {dataset_name}: {len(combined_dataset)} samples")
+    
+    # Combine all datasets
+    final_dataset = torch.utils.data.ConcatDataset(datasets)
+    print(f"Total classifier training samples: {len(final_dataset)}")
+    
+    return final_dataset, labels, image_processor
+
+class ClassifierDataset(Dataset):
+    """Dataset wrapper for classifier training."""
+    def __init__(self, base_dataset, labels):
+        self.base_dataset = base_dataset
+        self.labels = labels
+    
+    def __len__(self):
+        return len(self.base_dataset)
+    
+    def __getitem__(self, idx):
+        item = self.base_dataset[idx]
+        pixel_values = item['pixel_values']
+        dataset_label = self.labels[idx]
+        
+        return {
+            'pixel_values': pixel_values,
+            'labels': torch.tensor(dataset_label, dtype=torch.long)
+        }
+
+def train_classifier(config, device, expert_weights_dir, epochs=10):
+    """Train the dataset classifier."""
+    print("="*60)
+    print("PHASE 1: TRAINING DATASET CLASSIFIER")
+    print("="*60)
+    
+    # Create classifier training dataset
+    base_dataset, labels, image_processor = create_classifier_dataset(expert_weights_dir, config, device)
+    classifier_dataset = ClassifierDataset(base_dataset, labels)
+    
+    # Split into train/val
+    dataset_size = len(classifier_dataset)
+    val_size = int(0.2 * dataset_size)
+    train_size = dataset_size - val_size
+    
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        classifier_dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+    
+    print(f"Classifier training: {len(train_dataset)} samples")
+    print(f"Classifier validation: {len(val_dataset)} samples")
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=16, 
+        shuffle=True, 
+        num_workers=2,
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=16, 
+        shuffle=False, 
+        num_workers=2,
+        pin_memory=True
+    )
+    
+    # Initialize classifier
+    classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
+    
+    # Training setup
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(classifier.parameters(), lr=0.001, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, factor=0.5)
+    
+    best_val_acc = 0.0
+    best_val_loss = float('inf')
+    patience = 5
+    patience_counter = 0
+    
+    # Create save directory
+    moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
+    os.makedirs(moe_save_dir, exist_ok=True)
+    
+    print(f"\nStarting classifier training for {epochs} epochs...")
+    print(f"Save directory: {moe_save_dir}")
+    
+    for epoch in range(epochs):
+        # Training phase
+        classifier.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
+        for batch in train_pbar:
+            pixel_values = batch['pixel_values'].to(device)
+            labels = batch['labels'].to(device)
+            
+            optimizer.zero_grad()
+            outputs = classifier(pixel_values)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            _, predicted = torch.max(outputs.data, 1)
+            train_total += labels.size(0)
+            train_correct += (predicted == labels).sum().item()
+            
+            train_pbar.set_postfix({
+                'Loss': f"{loss.item():.4f}",
+                'Acc': f"{100.*train_correct/train_total:.2f}%"
+            })
+        
+        train_acc = 100. * train_correct / train_total
+        train_loss = train_loss / len(train_loader)
+        
+        # Validation phase
+        classifier.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]")
+            for batch in val_pbar:
+                pixel_values = batch['pixel_values'].to(device)
+                labels = batch['labels'].to(device)
+                
+                outputs = classifier(pixel_values)
+                loss = criterion(outputs, labels)
+                
+                val_loss += loss.item()
+                _, predicted = torch.max(outputs.data, 1)
+                val_total += labels.size(0)
+                val_correct += (predicted == labels).sum().item()
+                
+                val_pbar.set_postfix({
+                    'Loss': f"{loss.item():.4f}",
+                    'Acc': f"{100.*val_correct/val_total:.2f}%"
+                })
+        
+        val_acc = 100. * val_correct / val_total
+        val_loss = val_loss / len(val_loader)
+        
+        # Learning rate scheduling
+        scheduler.step(val_loss)
+        
+        print(f"\nEpoch {epoch+1}/{epochs}:")
+        print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
+        print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+        print(f"  Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
+        
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_val_loss = val_loss
+            patience_counter = 0
+            
+            best_model_path = os.path.join(moe_save_dir, 'classifier_best.pth')
+            torch.save(classifier.state_dict(), best_model_path)
+            print(f"  ✅ New best model saved! Val Acc: {val_acc:.2f}%")
+        else:
+            patience_counter += 1
+            print(f"  No improvement. Patience: {patience_counter}/{patience}")
+        
+        # Early stopping
+        if patience_counter >= patience:
+            print(f"\nEarly stopping triggered after {epoch+1} epochs")
+            break
+        
+        print("-" * 50)
+    
+    # Save final model
+    final_model_path = os.path.join(moe_save_dir, 'classifier_final.pth')
+    torch.save(classifier.state_dict(), final_model_path)
+    
+    print(f"\n" + "="*60)
+    print("CLASSIFIER TRAINING COMPLETED!")
+    print(f"Best validation accuracy: {best_val_acc:.2f}%")
+    print(f"Best model saved to: {os.path.join(moe_save_dir, 'classifier_best.pth')}")
+    print(f"Final model saved to: {final_model_path}")
+    print("="*60)
+    
+    return classifier, best_val_acc
+
 def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None, test=False):
     """Main function."""
     config = load_config(config_path)
@@ -549,6 +772,54 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, phase=None, tes
         print("✅ Ready for deployment or further evaluation")
         print("="*60)
         return results
+    
+    # Handle different phases
+    if phase == '1':
+        # Phase 1: Train classifier only
+        print("Running Phase 1: Classifier Training Only")
+        epochs = epoch if epoch else 20
+        classifier, best_acc = train_classifier(config, device, expert_weights_dir, epochs)
+        print(f"Classifier training completed with best accuracy: {best_acc:.2f}%")
+        
+    elif phase == '2':
+        # Phase 2: Test only (same as --test)
+        target_dataset = dataset if dataset else 'CSAW'
+        print(f"Running Phase 2: Test-only mode on dataset: {target_dataset}")
+        results = test_only_mode(config, device, target_dataset, expert_weights_dir)
+        return results
+        
+    else:
+        # Default: Run both phases
+        print("Running Full Training Pipeline (Phase 1 + Phase 2)")
+        
+        # Phase 1: Train classifier
+        epochs = epoch if epoch else 20
+        print(f"\nStarting Phase 1 with {epochs} epochs...")
+        classifier, best_acc = train_classifier(config, device, expert_weights_dir, epochs)
+        print(f"Phase 1 completed with best accuracy: {best_acc:.2f}%")
+        
+        # Phase 2: Test on all datasets
+        target_datasets = ['CSAW', 'DMID', 'DDSM'] if not dataset else [dataset]
+        
+        print(f"\nStarting Phase 2: Testing on datasets: {target_datasets}")
+        all_results = {}
+        
+        for test_dataset in target_datasets:
+            print(f"\n{'='*50}")
+            print(f"Testing on {test_dataset}")
+            print('='*50)
+            
+            results = test_only_mode(config, device, test_dataset, expert_weights_dir)
+            all_results[test_dataset] = results
+        
+        print(f"\n" + "="*60)
+        print("FULL PIPELINE COMPLETED!")
+        print("✅ Classifier trained and saved")
+        print("✅ SimpleMoE tested on all datasets")
+        print("✅ Model saved in standard format")
+        print("="*60)
+        
+        return all_results
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
