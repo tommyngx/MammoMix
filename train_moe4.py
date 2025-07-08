@@ -335,72 +335,85 @@ def create_calibration_dataset(config, image_processor, device, dataset_name):
 
 def compute_calibration_loss(pred_boxes, pred_logits, target_labels, device):
     """Compute calibration loss comparing predictions with ground truth."""
-    # Ensure all tensors are on the correct device
+    # Ensure predictions are on the correct device first
     pred_boxes = pred_boxes.to(device)
     pred_logits = pred_logits.to(device)
     
-    total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    # Initialize loss on the correct device
+    total_loss = torch.tensor(0.0, device=device, requires_grad=False)
     valid_samples = 0
     
     # Box regression loss (only for positive targets)
     for i, labels in enumerate(target_labels):
         if labels and len(labels) > 0:
             try:
-                # Ensure target data is properly formatted and on correct device
-                target_boxes_list = []
-                target_classes_list = []
+                # Process each target label carefully
+                sample_loss = torch.tensor(0.0, device=device, requires_grad=False)
+                sample_targets = 0
                 
                 for label in labels:
-                    if 'boxes' in label and 'class_labels' in label:
-                        # Convert boxes to tensor and ensure it's on the correct device
+                    if isinstance(label, dict) and 'boxes' in label:
+                        # Extract and convert boxes to tensor on correct device
                         boxes = label['boxes']
-                        if isinstance(boxes, (list, tuple)):
-                            boxes = torch.tensor(boxes, dtype=torch.float32, device=device)
-                        else:
-                            boxes = torch.as_tensor(boxes, dtype=torch.float32, device=device)
                         
-                        # Ensure boxes are in the correct shape
-                        if boxes.dim() == 1 and len(boxes) == 4:
-                            boxes = boxes.unsqueeze(0)  # [1, 4]
+                        # Handle different box formats
+                        if isinstance(boxes, torch.Tensor):
+                            boxes = boxes.detach().clone().to(device)
+                        elif isinstance(boxes, (list, tuple)):
+                            # Convert to tensor ensuring it's on the correct device
+                            try:
+                                boxes = torch.tensor(boxes, dtype=torch.float32, device=device)
+                            except:
+                                continue  # Skip malformed boxes
+                        else:
+                            continue  # Skip unsupported formats
+                        
+                        # Ensure proper shape: should be [N, 4] or [4]
+                        if boxes.dim() == 1:
+                            if len(boxes) == 4:
+                                boxes = boxes.unsqueeze(0)  # [1, 4]
+                            else:
+                                continue  # Skip invalid boxes
                         elif boxes.dim() == 2:
-                            pass  # Already correct shape [N, 4]
+                            if boxes.shape[1] != 4:
+                                continue  # Skip invalid boxes
                         else:
                             continue  # Skip invalid boxes
                         
-                        target_boxes_list.append(boxes)
+                        # Ensure boxes are in valid range [0, 1]
+                        boxes = torch.clamp(boxes, 0.0, 1.0)
                         
-                        # Handle class labels
-                        classes = label['class_labels']
-                        if isinstance(classes, (int, float)):
-                            classes = [classes]
-                        classes = torch.tensor(classes, dtype=torch.long, device=device)
-                        target_classes_list.append(classes)
+                        # Calculate loss for this target
+                        num_boxes = boxes.shape[0]
+                        num_preds = min(num_boxes, pred_boxes.shape[1])
+                        
+                        if num_preds > 0:
+                            # Get predictions for this sample and ensure on correct device
+                            sample_pred = pred_boxes[i, :num_preds].to(device)
+                            sample_target = boxes[:num_preds].to(device)
+                            
+                            # Compute L1 loss
+                            box_loss = F.l1_loss(sample_pred, sample_target, reduction='mean')
+                            sample_loss = sample_loss + box_loss
+                            sample_targets += 1
                 
-                if target_boxes_list:
-                    # Concatenate all target boxes for this sample
-                    target_boxes = torch.cat(target_boxes_list, dim=0)  # [total_targets, 4]
+                # Add sample loss if we had valid targets
+                if sample_targets > 0:
+                    total_loss = total_loss + (sample_loss / sample_targets)
+                    valid_samples += 1
                     
-                    # Simple L1 loss for box refinement
-                    if len(target_boxes) > 0:
-                        # Take first few predictions that match number of targets
-                        num_targets = min(len(target_boxes), pred_boxes.shape[1])
-                        if num_targets > 0:
-                            # Ensure both tensors are on the same device
-                            pred_subset = pred_boxes[i, :num_targets].to(device)
-                            target_subset = target_boxes[:num_targets].to(device)
-                            
-                            box_loss = F.l1_loss(pred_subset, target_subset)
-                            total_loss = total_loss + box_loss
-                            valid_samples += 1
-                            
             except Exception as e:
-                # Skip problematic samples with detailed error info
-                print(f"Warning: Skipping sample {i} due to error: {e}")
+                # Skip problematic samples
+                print(f"Warning: Skipping sample {i} in loss computation: {e}")
                 continue
     
-    # Normalize loss by number of valid samples
+    # Normalize by number of valid samples
     if valid_samples > 0:
         total_loss = total_loss / valid_samples
+        total_loss.requires_grad_(True)
+    else:
+        # Return a small loss if no valid samples
+        total_loss = torch.tensor(0.001, device=device, requires_grad=True)
     
     return total_loss
 
@@ -478,7 +491,9 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
     # Create data loaders with proper device handling
     def custom_collate_fn(batch):
         """Custom collate function ensuring all data is on correct device."""
-        pixel_values = torch.stack([item['pixel_values'] for item in batch]).to(device)
+        # Stack pixel values and move to device
+        pixel_values = torch.stack([item['pixel_values'] for item in batch])
+        # Don't move labels to device yet - handle in training loop
         labels = [item['labels'] for item in batch]
         return {'pixel_values': pixel_values, 'labels': labels}
     
@@ -536,38 +551,41 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         for batch_idx, batch in enumerate(train_pbar):
             try:
-                pixel_values = batch['pixel_values']  # Already on device
-                labels = batch['labels']
-                
-                # Ensure pixel_values is on the correct device
-                pixel_values = pixel_values.to(device)
+                # Move data to device explicitly
+                pixel_values = batch['pixel_values'].to(device, non_blocking=True)
+                labels = batch['labels']  # Keep on CPU for now
                 
                 optimizer.zero_grad()
                 
-                # Get MoE output first (frozen)
+                # Get MoE output first (frozen) - ensure everything is on device
                 with torch.no_grad():
                     calibrated_model.moe.eval()
                     moe_output = calibrated_model.moe(pixel_values, labels=labels)
                 
-                # Ensure MoE outputs are on the correct device
-                moe_pred_boxes = moe_output.pred_boxes.detach().to(device)
-                moe_logits = moe_output.logits.detach().to(device)
+                # Ensure MoE outputs are on the correct device and detached
+                moe_pred_boxes = moe_output.pred_boxes.detach().to(device, non_blocking=True)
+                moe_logits = moe_output.logits.detach().to(device, non_blocking=True)
                 
-                # Apply calibration (trainable)
+                # Apply calibration (trainable) - ensure outputs stay on device
                 refined_boxes, refined_logits = calibrated_model.calibration(
                     moe_pred_boxes, 
                     moe_logits
                 )
                 
+                # Ensure calibration outputs are on device
+                refined_boxes = refined_boxes.to(device)
+                refined_logits = refined_logits.to(device)
+                
                 # Compute custom calibration loss with ground truth
                 calibration_loss = compute_calibration_loss(refined_boxes, refined_logits, labels, device)
                 
+                # Ensure loss is on correct device
+                calibration_loss = calibration_loss.to(device)
+                
                 # Check if loss is valid
                 if torch.isfinite(calibration_loss) and calibration_loss > 0:
-                    # Add original MoE loss for stability (detached)
+                    # Use only calibration loss for training
                     total_loss = calibration_loss
-                    if moe_output.loss is not None and torch.isfinite(moe_output.loss):
-                        total_loss = total_loss + 0.1 * moe_output.loss.detach()
                     
                     total_loss.backward()
                     
@@ -593,6 +611,8 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
                     
             except Exception as e:
                 print(f"Error in training step {batch_idx}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
         avg_train_loss = train_loss / max(train_steps, 1)
