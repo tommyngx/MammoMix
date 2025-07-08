@@ -201,7 +201,7 @@ def load_pretrained_moe(expert_weights_dir, device):
     """Load pre-trained MoE model directly from saved checkpoint."""
     moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
     
-    # First try to load from the saved MoE model
+    # Check if we have a saved SimpleMoE model
     saved_moe_path = None
     for filename in ['model.safetensors', 'pytorch_model.bin']:
         potential_path = os.path.join(moe_save_dir, filename)
@@ -210,26 +210,84 @@ def load_pretrained_moe(expert_weights_dir, device):
             break
     
     if saved_moe_path:
-        print(f"Loading pre-trained MoE from: {saved_moe_path}")
-        try:
-            moe_model = AutoModelForObjectDetection.from_pretrained(
-                saved_moe_path,
-                id2label={0: 'cancer'},
-                label2id={'cancer': 0},
-                auxiliary_loss=False,
-            ).to(device)
+        print(f"Found saved MoE at: {saved_moe_path}")
+        
+        # Check the config to see if it's our custom SimpleMoE
+        config_path = os.path.join(saved_moe_path, 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                model_config = json.load(f)
             
-            # Load image processor
-            image_processor = AutoImageProcessor.from_pretrained(saved_moe_path)
+            # If it's our custom SimpleMoE, we need to reconstruct it manually
+            if model_config.get('model_type') == 'simple_moe':
+                print("Detected custom SimpleMoE model - reconstructing manually...")
+                
+                # Load expert models and classifier first
+                expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
+                image_processor = expert_processors[0]
+                
+                # Load trained classifier
+                classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
+                if not os.path.exists(classifier_path):
+                    classifier_final_path = os.path.join(moe_save_dir, 'classifier_final.pth')
+                    if os.path.exists(classifier_final_path):
+                        classifier_path = classifier_final_path
+                    else:
+                        raise FileNotFoundError(f"No classifier found in {moe_save_dir}.")
+                
+                # Initialize and load classifier
+                classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
+                classifier.load_state_dict(torch.load(classifier_path, map_location=device))
+                classifier.eval()
+                
+                # Create SimpleMoE model
+                moe_model = SimpleMoE(expert_models, classifier, device).to(device)
+                
+                # Try to load the saved MoE weights if they exist
+                try:
+                    if os.path.exists(os.path.join(saved_moe_path, 'model.safetensors')):
+                        from safetensors.torch import load_file
+                        saved_state = load_file(os.path.join(saved_moe_path, 'model.safetensors'))
+                    else:
+                        saved_state = torch.load(os.path.join(saved_moe_path, 'pytorch_model.bin'), map_location=device)
+                    
+                    # Load the state dict (this might not work perfectly, but we'll try)
+                    try:
+                        moe_model.load_state_dict(saved_state, strict=False)
+                        print("✅ Successfully loaded saved SimpleMoE weights")
+                    except Exception as e:
+                        print(f"⚠️ Could not load saved weights ({e}), using freshly initialized MoE")
+                        
+                except Exception as e:
+                    print(f"⚠️ Could not load saved model file ({e}), using freshly initialized MoE")
+                
+                moe_model.eval()
+                print("✅ SimpleMoE reconstructed successfully")
+                return moe_model, image_processor
             
-            print("✅ Pre-trained MoE loaded from saved checkpoint")
-            return moe_model, image_processor
-            
-        except Exception as e:
-            print(f"Failed to load saved MoE: {e}")
-            print("Falling back to expert models...")
+            else:
+                # Try to load as a regular model
+                print("Attempting to load as standard HuggingFace model...")
+                try:
+                    moe_model = AutoModelForObjectDetection.from_pretrained(
+                        saved_moe_path,
+                        id2label={0: 'cancer'},
+                        label2id={'cancer': 0},
+                        auxiliary_loss=False,
+                    ).to(device)
+                    
+                    # Load image processor
+                    image_processor = AutoImageProcessor.from_pretrained(saved_moe_path)
+                    
+                    print("✅ Pre-trained MoE loaded from saved checkpoint")
+                    return moe_model, image_processor
+                    
+                except Exception as e:
+                    print(f"Failed to load as standard model: {e}")
+                    print("Falling back to expert models...")
     
-    # Fallback: Load expert models and create MoE (reuse from train_moe3.py)
+    # Fallback: Load expert models and create MoE from scratch
+    print("Loading expert models and creating SimpleMoE from scratch...")
     expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
     image_processor = expert_processors[0]
     
@@ -252,6 +310,7 @@ def load_pretrained_moe(expert_weights_dir, device):
     moe_model = SimpleMoE(expert_models, classifier, device).to(device)
     moe_model.eval()
     
+    print("✅ SimpleMoE created from expert models and classifier")
     return moe_model, image_processor
 
 def create_calibration_dataset(config, image_processor, device, dataset_name):
@@ -276,29 +335,72 @@ def create_calibration_dataset(config, image_processor, device, dataset_name):
 
 def compute_calibration_loss(pred_boxes, pred_logits, target_labels, device):
     """Compute calibration loss comparing predictions with ground truth."""
-    # Move all tensors to the same device
+    # Ensure all tensors are on the correct device
     pred_boxes = pred_boxes.to(device)
     pred_logits = pred_logits.to(device)
     
     total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    valid_samples = 0
     
     # Box regression loss (only for positive targets)
     for i, labels in enumerate(target_labels):
         if labels and len(labels) > 0:
             try:
-                target_boxes = torch.stack([torch.tensor(label['boxes'], device=device, dtype=torch.float32) for label in labels])
-                target_classes = torch.tensor([label['class_labels'] for label in labels], device=device)
+                # Ensure target data is properly formatted and on correct device
+                target_boxes_list = []
+                target_classes_list = []
                 
-                # Simple L1 loss for box refinement
-                if len(target_boxes) > 0:
-                    # Take first few predictions that match number of targets
-                    num_targets = min(len(target_boxes), pred_boxes.shape[1])
-                    if num_targets > 0:
-                        box_loss = F.l1_loss(pred_boxes[i, :num_targets], target_boxes[:num_targets])
-                        total_loss = total_loss + box_loss
+                for label in labels:
+                    if 'boxes' in label and 'class_labels' in label:
+                        # Convert boxes to tensor and ensure it's on the correct device
+                        boxes = label['boxes']
+                        if isinstance(boxes, (list, tuple)):
+                            boxes = torch.tensor(boxes, dtype=torch.float32, device=device)
+                        else:
+                            boxes = torch.as_tensor(boxes, dtype=torch.float32, device=device)
+                        
+                        # Ensure boxes are in the correct shape
+                        if boxes.dim() == 1 and len(boxes) == 4:
+                            boxes = boxes.unsqueeze(0)  # [1, 4]
+                        elif boxes.dim() == 2:
+                            pass  # Already correct shape [N, 4]
+                        else:
+                            continue  # Skip invalid boxes
+                        
+                        target_boxes_list.append(boxes)
+                        
+                        # Handle class labels
+                        classes = label['class_labels']
+                        if isinstance(classes, (int, float)):
+                            classes = [classes]
+                        classes = torch.tensor(classes, dtype=torch.long, device=device)
+                        target_classes_list.append(classes)
+                
+                if target_boxes_list:
+                    # Concatenate all target boxes for this sample
+                    target_boxes = torch.cat(target_boxes_list, dim=0)  # [total_targets, 4]
+                    
+                    # Simple L1 loss for box refinement
+                    if len(target_boxes) > 0:
+                        # Take first few predictions that match number of targets
+                        num_targets = min(len(target_boxes), pred_boxes.shape[1])
+                        if num_targets > 0:
+                            # Ensure both tensors are on the same device
+                            pred_subset = pred_boxes[i, :num_targets].to(device)
+                            target_subset = target_boxes[:num_targets].to(device)
+                            
+                            box_loss = F.l1_loss(pred_subset, target_subset)
+                            total_loss = total_loss + box_loss
+                            valid_samples += 1
+                            
             except Exception as e:
-                # Skip problematic samples
+                # Skip problematic samples with detailed error info
+                print(f"Warning: Skipping sample {i} due to error: {e}")
                 continue
+    
+    # Normalize loss by number of valid samples
+    if valid_samples > 0:
+        total_loss = total_loss / valid_samples
     
     return total_loss
 
@@ -382,7 +484,7 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
     
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=2,  # Very small batch size for stability
+        batch_size=1,  # Use batch size 1 to avoid complex batching issues
         shuffle=True, 
         num_workers=0,  # Avoid multiprocessing issues
         collate_fn=custom_collate_fn,
@@ -390,7 +492,7 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
     )
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=2, 
+        batch_size=1, 
         shuffle=False, 
         num_workers=0,
         collate_fn=custom_collate_fn,
@@ -400,8 +502,8 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
     # Training setup
     optimizer = torch.optim.AdamW(
         calibrated_model.calibration.parameters(), 
-        lr=5e-5,  # Lower learning rate for fine-tuning
-        weight_decay=1e-6
+        lr=1e-4,  # Slightly higher learning rate for better convergence
+        weight_decay=1e-5
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', patience=2, factor=0.7, verbose=True
@@ -432,10 +534,13 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
         train_steps = 0
         
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
-        for batch in train_pbar:
+        for batch_idx, batch in enumerate(train_pbar):
             try:
                 pixel_values = batch['pixel_values']  # Already on device
                 labels = batch['labels']
+                
+                # Ensure pixel_values is on the correct device
+                pixel_values = pixel_values.to(device)
                 
                 optimizer.zero_grad()
                 
@@ -444,25 +549,30 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
                     calibrated_model.moe.eval()
                     moe_output = calibrated_model.moe(pixel_values, labels=labels)
                 
+                # Ensure MoE outputs are on the correct device
+                moe_pred_boxes = moe_output.pred_boxes.detach().to(device)
+                moe_logits = moe_output.logits.detach().to(device)
+                
                 # Apply calibration (trainable)
                 refined_boxes, refined_logits = calibrated_model.calibration(
-                    moe_output.pred_boxes.detach(), 
-                    moe_output.logits.detach()
+                    moe_pred_boxes, 
+                    moe_logits
                 )
                 
                 # Compute custom calibration loss with ground truth
                 calibration_loss = compute_calibration_loss(refined_boxes, refined_logits, labels, device)
                 
-                # Add original MoE loss for stability
-                total_loss = calibration_loss
-                if moe_output.loss is not None:
-                    total_loss = total_loss + 0.1 * moe_output.loss.detach()
-                
-                if torch.isfinite(total_loss) and total_loss > 0:
+                # Check if loss is valid
+                if torch.isfinite(calibration_loss) and calibration_loss > 0:
+                    # Add original MoE loss for stability (detached)
+                    total_loss = calibration_loss
+                    if moe_output.loss is not None and torch.isfinite(moe_output.loss):
+                        total_loss = total_loss + 0.1 * moe_output.loss.detach()
+                    
                     total_loss.backward()
                     
                     # Gradient clipping
-                    torch.nn.utils.clip_grad_norm_(calibrated_model.calibration.parameters(), max_norm=0.5)
+                    torch.nn.utils.clip_grad_norm_(calibrated_model.calibration.parameters(), max_norm=1.0)
                     
                     optimizer.step()
                     
@@ -471,11 +581,18 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
                     
                     train_pbar.set_postfix({
                         'Loss': f"{total_loss.item():.4f}",
-                        'Avg': f"{train_loss/train_steps:.4f}"
+                        'Avg': f"{train_loss/train_steps:.4f}",
+                        'Cal': f"{calibration_loss.item():.4f}"
+                    })
+                else:
+                    # Skip this batch if loss is invalid
+                    train_pbar.set_postfix({
+                        'Loss': 'Invalid',
+                        'Avg': f"{train_loss/max(train_steps,1):.4f}" if train_steps > 0 else "0.0000"
                     })
                     
             except Exception as e:
-                print(f"Error in training step: {e}")
+                print(f"Error in training step {batch_idx}: {e}")
                 continue
         
         avg_train_loss = train_loss / max(train_steps, 1)
@@ -487,34 +604,38 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
         
         with torch.no_grad():
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]")
-            for batch in val_pbar:
+            for batch_idx, batch in enumerate(val_pbar):
                 try:
-                    pixel_values = batch['pixel_values']
+                    pixel_values = batch['pixel_values'].to(device)
                     labels = batch['labels']
                     
                     # Get MoE output
                     moe_output = calibrated_model.moe(pixel_values, labels=labels)
                     
+                    # Ensure outputs are on correct device
+                    moe_pred_boxes = moe_output.pred_boxes.to(device)
+                    moe_logits = moe_output.logits.to(device)
+                    
                     # Apply calibration
                     refined_boxes, refined_logits = calibrated_model.calibration(
-                        moe_output.pred_boxes, 
-                        moe_output.logits
+                        moe_pred_boxes, 
+                        moe_logits
                     )
                     
                     # Compute validation loss
                     calibration_loss = compute_calibration_loss(refined_boxes, refined_logits, labels, device)
                     
-                    if torch.isfinite(calibration_loss):
+                    if torch.isfinite(calibration_loss) and calibration_loss >= 0:
                         val_loss += calibration_loss.item()
                         val_steps += 1
                     
                     val_pbar.set_postfix({
-                        'Loss': f"{calibration_loss.item():.4f}",
+                        'Loss': f"{calibration_loss.item():.4f}" if torch.isfinite(calibration_loss) else "Invalid",
                         'Avg': f"{val_loss/max(val_steps,1):.4f}"
                     })
                     
                 except Exception as e:
-                    print(f"Error in validation step: {e}")
+                    print(f"Error in validation step {batch_idx}: {e}")
                     continue
         
         avg_val_loss = val_loss / max(val_steps, 1)
