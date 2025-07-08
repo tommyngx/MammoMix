@@ -42,70 +42,6 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-class SimpleDatasetClassifier(nn.Module):
-    """Simple CNN to classify which dataset an image belongs to."""
-    def __init__(self, num_classes=3, device='cuda'):
-        super().__init__()
-        self.num_classes = num_classes
-        self.device = device
-        self.class_names = ['CSAW', 'DMID', 'DDSM']
-        
-        # Simple CNN for dataset classification
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(128, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(4),
-        )
-        
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(256 * 4 * 4, 512),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(512, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, num_classes)
-        )
-        
-        self._initialize_weights()
-    
-    def _initialize_weights(self):
-        """Initialize weights properly."""
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
-    
-    def forward(self, x):
-        """Forward pass."""
-        features = self.features(x)
-        logits = self.classifier(features)
-        return logits
-
 class BoundingBoxCalibrationLayer(nn.Module):
     """Calibration layer to refine bounding box predictions."""
     def __init__(self, input_dim=4, hidden_dim=128, device='cuda'):
@@ -199,145 +135,6 @@ class BoundingBoxCalibrationLayer(nn.Module):
         
         return refined_boxes, refined_logits
 
-class SimpleMoE(nn.Module):
-    """Simple MoE with frozen components."""
-    def __init__(self, expert_models, dataset_classifier, device):
-        super().__init__()
-        self.experts = nn.ModuleList(expert_models)
-        self.classifier = dataset_classifier
-        self.device = device
-        self.expert_names = ['CSAW', 'DMID', 'DDSM']
-        
-        # Freeze ALL components
-        for expert in self.experts:
-            for param in expert.parameters():
-                param.requires_grad = False
-            expert.eval()
-        
-        for param in self.classifier.parameters():
-            param.requires_grad = False
-        self.classifier.eval()
-        
-        # Statistics
-        self.routing_counts = torch.zeros(3, device=device)
-        self.total_routed = 0
-
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        pass
-    
-    def gradient_checkpointing_disable(self):
-        pass
-    
-    def forward(self, pixel_values, labels=None, return_routing=False):
-        """Forward pass with dataset classification routing."""
-        batch_size = pixel_values.shape[0]
-        
-        # 1. Classifier chooses expert
-        with torch.no_grad():
-            self.classifier.eval()
-            dataset_logits = self.classifier(pixel_values)
-            expert_choices = torch.argmax(dataset_logits, dim=1)
-        
-        # 2. Update statistics
-        if not self.training:
-            for choice in expert_choices:
-                self.routing_counts[choice] += 1
-            self.total_routed += batch_size
-        
-        # 3. Group by expert
-        expert_groups = {}
-        for i in range(batch_size):
-            expert_idx = expert_choices[i].item()
-            if expert_idx not in expert_groups:
-                expert_groups[expert_idx] = []
-            expert_groups[expert_idx].append(i)
-        
-        # 4. Get expert outputs
-        sample_to_output = {}
-        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-        
-        for expert_idx, sample_indices in expert_groups.items():
-            expert_pixel_values = pixel_values[sample_indices]
-            expert_labels = None
-            if labels is not None:
-                expert_labels = [labels[i] for i in sample_indices]
-            
-            with torch.no_grad():
-                self.experts[expert_idx].eval()
-                expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
-            
-            if hasattr(expert_output, 'loss') and expert_output.loss is not None:
-                weight = len(sample_indices) / batch_size
-                total_loss = total_loss + expert_output.loss * weight
-            
-            for i, sample_idx in enumerate(sample_indices):
-                sample_to_output[sample_idx] = {
-                    'logits': expert_output.logits[i].clone(),
-                    'pred_boxes': expert_output.pred_boxes[i].clone(),
-                }
-        
-        # 5. Reconstruct batch
-        batch_logits = []
-        batch_pred_boxes = []
-        
-        first_sample_idx = list(sample_to_output.keys())[0]
-        ref_logits_shape = sample_to_output[first_sample_idx]['logits'].shape
-        ref_boxes_shape = sample_to_output[first_sample_idx]['pred_boxes'].shape
-        
-        for i in range(batch_size):
-            if i in sample_to_output:
-                batch_logits.append(sample_to_output[i]['logits'])
-                batch_pred_boxes.append(sample_to_output[i]['pred_boxes'])
-            else:
-                dummy_logits = torch.zeros(ref_logits_shape, device=pixel_values.device)
-                dummy_boxes = torch.zeros(ref_boxes_shape, device=pixel_values.device)
-                batch_logits.append(dummy_logits)
-                batch_pred_boxes.append(dummy_boxes)
-        
-        batch_logits = torch.stack(batch_logits, dim=0)
-        batch_pred_boxes = torch.stack(batch_pred_boxes, dim=0)
-        batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
-        
-        # 6. Create output
-        from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
-        
-        final_loss = None
-        if labels is not None:
-            final_loss = total_loss
-        
-        combined_output = YolosObjectDetectionOutput(
-            loss=final_loss,
-            logits=batch_logits,
-            pred_boxes=batch_pred_boxes,
-            last_hidden_state=None
-        )
-        
-        if return_routing:
-            routing_info = {
-                'choices': expert_choices,
-                'groups': expert_groups,
-                'stats': self.get_routing_stats()
-            }
-            return combined_output, routing_info
-        else:
-            return combined_output
-    
-    def get_routing_stats(self):
-        """Get routing statistics."""
-        if self.total_routed == 0:
-            return {name: 0.0 for name in self.expert_names}
-        
-        stats = {}
-        usage = (self.routing_counts / self.total_routed).cpu().numpy()
-        for i, name in enumerate(self.expert_names):
-            stats[name] = float(usage[i])
-        return stats
-    
-    def reset_routing_stats(self):
-        """Reset routing statistics."""
-        self.routing_counts = torch.zeros(3, device=self.device)
-        self.total_routed = 0
-
 class CalibratedMoE(nn.Module):
     """MoE with calibration layer for refined outputs."""
     def __init__(self, moe_model, calibration_layer, device):
@@ -389,96 +186,135 @@ class CalibratedMoE(nn.Module):
         return calibrated_output
     
     def get_routing_stats(self):
-        """Delegate to MoE."""
-        return self.moe.get_routing_stats()
+        """Delegate to MoE if available."""
+        if hasattr(self.moe, 'get_routing_stats'):
+            return self.moe.get_routing_stats()
+        return {}
     
     def reset_routing_stats(self):
-        """Delegate to MoE."""
-        self.moe.reset_routing_stats()
-
-def load_expert_models(weight_dir, device):
-    """Load expert models."""
-    expert_names = ['yolos_CSAW', 'yolos_DMID', 'yolos_DDSM']
-    expert_paths = [os.path.join(weight_dir, name) for name in expert_names]
-    
-    models = []
-    processors = []
-    
-    for path in expert_paths:
-        processor = AutoImageProcessor.from_pretrained(path)
-        model = AutoModelForObjectDetection.from_pretrained(
-            path,
-            id2label={0: 'cancer'},
-            label2id={'cancer': 0},
-            auxiliary_loss=False,
-        )
-        model = model.to(device)
-        model.eval()
-        models.append(model)
-        processors.append(processor)
-    
-    return models, processors
+        """Delegate to MoE if available."""
+        if hasattr(self.moe, 'reset_routing_stats'):
+            self.moe.reset_routing_stats()
 
 def load_pretrained_moe(expert_weights_dir, device):
-    """Load pre-trained MoE with classifier."""
-    # Load expert models
-    expert_models, expert_processors = load_expert_models(expert_weights_dir, device)
-    image_processor = expert_processors[0]
-    
-    # Load trained classifier
+    """Load pre-trained MoE model directly from saved checkpoint."""
     moe_save_dir = os.path.join(expert_weights_dir, 'moe_MOMO')
-    classifier_path = os.path.join(moe_save_dir, 'classifier_best.pth')
     
-    if not os.path.exists(classifier_path):
-        classifier_final_path = os.path.join(moe_save_dir, 'classifier_final.pth')
-        if os.path.exists(classifier_final_path):
-            classifier_path = classifier_final_path
-        else:
-            raise FileNotFoundError(f"No classifier found in {moe_save_dir}. Run train_moe3.py first.")
+    # Check for saved MoE model files
+    saved_moe_path = None
+    for filename in ['model.safetensors', 'pytorch_model.bin']:
+        potential_path = os.path.join(moe_save_dir, filename)
+        if os.path.exists(potential_path):
+            saved_moe_path = moe_save_dir
+            break
     
-    # Initialize and load classifier
-    classifier = SimpleDatasetClassifier(num_classes=3, device=device).to(device)
-    classifier.load_state_dict(torch.load(classifier_path, map_location=device))
-    classifier.eval()
-    
-    # Create MoE model
-    moe_model = SimpleMoE(expert_models, classifier, device).to(device)
-    moe_model.eval()
-    
-    return moe_model, image_processor
+    if saved_moe_path:
+        print(f"Loading pre-trained MoE from: {saved_moe_path}")
+        try:
+            moe_model = AutoModelForObjectDetection.from_pretrained(
+                saved_moe_path,
+                id2label={0: 'cancer'},
+                label2id={'cancer': 0},
+                auxiliary_loss=False,
+            ).to(device)
+            
+            # Load image processor
+            image_processor = AutoImageProcessor.from_pretrained(saved_moe_path)
+            
+            print("✅ Pre-trained MoE loaded from saved checkpoint")
+            return moe_model, image_processor
+            
+        except Exception as e:
+            print(f"Failed to load saved MoE: {e}")
+            raise FileNotFoundError(f"Cannot load MoE model from {saved_moe_path}. Please ensure the model exists.")
+    else:
+        raise FileNotFoundError(f"No MoE model found in {moe_save_dir}. Please run train_moe3.py first.")
 
-def create_calibration_dataset(config, image_processor, device):
-    """Create dataset for calibration training using all datasets."""
+def create_calibration_dataset(config, image_processor, device, dataset_name):
+    """Create dataset for calibration training using only the specified dataset."""
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
     
-    datasets = []
-    dataset_names = ['CSAW', 'DMID', 'DDSM']
+    print(f"Loading {dataset_name} training data for calibration...")
     
-    for dataset_name in dataset_names:
-        print(f"Loading {dataset_name} training data for calibration...")
-        
-        train_dataset = BreastCancerDataset(
-            split='train',
-            splits_dir=SPLITS_DIR,
-            dataset_name=dataset_name,
-            image_processor=image_processor,
-            model_type=get_model_type(MODEL_NAME),
-        )
-        
-        datasets.append(train_dataset)
-        print(f"  {dataset_name}: {len(train_dataset)} samples")
+    train_dataset = BreastCancerDataset(
+        split='train',
+        splits_dir=SPLITS_DIR,
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(MODEL_NAME),
+    )
     
-    # Combine all datasets
-    combined_dataset = torch.utils.data.ConcatDataset(datasets)
-    print(f"Total calibration training samples: {len(combined_dataset)}")
+    print(f"  {dataset_name}: {len(train_dataset)} samples")
+    print(f"Total calibration training samples: {len(train_dataset)}")
     
-    return combined_dataset
+    return train_dataset
 
-def train_calibration_layer(config, device, expert_weights_dir, epochs=15):
-    """Train only the calibration layer."""
+def compute_calibration_loss(pred_boxes, pred_logits, target_labels, device):
+    """Compute calibration loss comparing predictions with ground truth."""
+    # Move all tensors to the same device
+    pred_boxes = pred_boxes.to(device)
+    pred_logits = pred_logits.to(device)
+    
+    total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    
+    # Box regression loss (only for positive targets)
+    for i, labels in enumerate(target_labels):
+        if labels and len(labels) > 0:
+            target_boxes = torch.stack([torch.tensor(label['boxes'], device=device) for label in labels])
+            target_classes = torch.tensor([label['class_labels'] for label in labels], device=device)
+            
+            # Simple L1 loss for box refinement
+            if len(target_boxes) > 0:
+                # Take first few predictions that match number of targets
+                num_targets = min(len(target_boxes), pred_boxes.shape[1])
+                box_loss = F.l1_loss(pred_boxes[i, :num_targets], target_boxes[:num_targets])
+                total_loss = total_loss + box_loss
+    
+    return total_loss
+
+def save_calibrated_moe_model(calibrated_model, image_processor, save_dir, dataset_name):
+    """Save calibrated MoE model in standard HuggingFace format."""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Save model weights
+    model_path = os.path.join(save_dir, 'model.safetensors')
+    from safetensors.torch import save_file
+    
+    # Only save calibration layer weights
+    calibration_state = {f"calibration.{k}": v for k, v in calibrated_model.calibration.state_dict().items()}
+    save_file(calibration_state, model_path)
+    
+    # Save preprocessor config
+    image_processor.save_pretrained(save_dir)
+    
+    # Create and save model config
+    config = {
+        "model_type": "calibrated_moe",
+        "base_model": "simple_moe",
+        "dataset_trained": dataset_name,
+        "calibration_layers": ["box_refiner", "logits_calibrator"],
+        "num_labels": 2,
+        "id2label": {"0": "cancer"},
+        "label2id": {"cancer": 0},
+        "problem_type": "single_label_classification",
+        "torch_dtype": "float32",
+        "transformers_version": "4.36.0"
+    }
+    
+    config_path = os.path.join(save_dir, 'config.json')
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    print(f"Calibrated MoE model saved to: {save_dir}")
+    print(f"  - model.safetensors (calibration weights)")
+    print(f"  - config.json") 
+    print(f"  - preprocessor_config.json")
+
+def train_calibration_layer(config, device, expert_weights_dir, dataset_name, epochs=15):
+    """Train only the calibration layer on specified dataset."""
     print("="*60)
-    print("PHASE: TRAINING CALIBRATION LAYER")
+    print(f"PHASE: TRAINING CALIBRATION LAYER ON {dataset_name}")
     print("="*60)
     
     # Load pre-trained MoE
@@ -492,8 +328,8 @@ def train_calibration_layer(config, device, expert_weights_dir, epochs=15):
     # Create calibrated model
     calibrated_model = CalibratedMoE(moe_model, calibration_layer, device).to(device)
     
-    # Create calibration dataset
-    calibration_dataset = create_calibration_dataset(config, image_processor, device)
+    # Create calibration dataset for specific dataset only
+    calibration_dataset = create_calibration_dataset(config, image_processor, device, dataset_name)
     
     # Split dataset
     dataset_size = len(calibration_dataset)
@@ -508,37 +344,43 @@ def train_calibration_layer(config, device, expert_weights_dir, epochs=15):
     print(f"Calibration training: {len(train_dataset)} samples")
     print(f"Calibration validation: {len(val_dataset)} samples")
     
-    # Create data loaders
+    # Create data loaders with proper device handling
+    def custom_collate_fn(batch):
+        """Custom collate function ensuring all data is on correct device."""
+        pixel_values = torch.stack([item['pixel_values'] for item in batch]).to(device)
+        labels = [item['labels'] for item in batch]
+        return {'pixel_values': pixel_values, 'labels': labels}
+    
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=4,  # Smaller batch size for object detection
+        batch_size=2,  # Very small batch size for stability
         shuffle=True, 
-        num_workers=2,
-        collate_fn=collate_fn,
-        pin_memory=True
+        num_workers=0,  # Avoid multiprocessing issues
+        collate_fn=custom_collate_fn,
+        pin_memory=False  # Disable pin_memory to avoid device issues
     )
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=4, 
+        batch_size=2, 
         shuffle=False, 
-        num_workers=2,
-        collate_fn=collate_fn,
-        pin_memory=True
+        num_workers=0,
+        collate_fn=custom_collate_fn,
+        pin_memory=False
     )
     
     # Training setup
     optimizer = torch.optim.AdamW(
         calibrated_model.calibration.parameters(), 
-        lr=1e-4, 
-        weight_decay=1e-5
+        lr=5e-5,  # Lower learning rate for fine-tuning
+        weight_decay=1e-6
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', patience=3, factor=0.5, verbose=True
+        optimizer, mode='min', patience=2, factor=0.7, verbose=True
     )
     
     # Training tracking
     best_val_loss = float('inf')
-    patience = 7
+    patience = 5
     patience_counter = 0
     
     # Save directory
@@ -547,6 +389,7 @@ def train_calibration_layer(config, device, expert_weights_dir, epochs=15):
     
     print(f"\nStarting calibration training for {epochs} epochs...")
     print(f"Save directory: {calibrated_save_dir}")
+    print(f"Training dataset: {dataset_name}")
     print(f"Only training calibration layer parameters: {sum(p.numel() for p in calibrated_model.calibration.parameters()):,}")
     
     for epoch in range(epochs):
@@ -558,31 +401,50 @@ def train_calibration_layer(config, device, expert_weights_dir, epochs=15):
         
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Train]")
         for batch in train_pbar:
-            pixel_values = batch['pixel_values'].to(device)
-            labels = batch['labels']
-            
-            optimizer.zero_grad()
-            
-            # Forward pass (only calibration layer is trainable)
-            outputs = calibrated_model(pixel_values, labels=labels)
-            
-            # Use the loss from the output
-            loss = outputs.loss
-            if loss is not None and torch.isfinite(loss):
-                loss.backward()
+            try:
+                pixel_values = batch['pixel_values']  # Already on device
+                labels = batch['labels']
                 
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(calibrated_model.calibration.parameters(), max_norm=1.0)
+                optimizer.zero_grad()
                 
-                optimizer.step()
+                # Get MoE output first (frozen)
+                with torch.no_grad():
+                    calibrated_model.moe.eval()
+                    moe_output = calibrated_model.moe(pixel_values, labels=labels)
                 
-                train_loss += loss.item()
-                train_steps += 1
+                # Apply calibration (trainable)
+                refined_boxes, refined_logits = calibrated_model.calibration(
+                    moe_output.pred_boxes.detach(), 
+                    moe_output.logits.detach()
+                )
                 
-                train_pbar.set_postfix({
-                    'Loss': f"{loss.item():.4f}",
-                    'Avg': f"{train_loss/train_steps:.4f}"
-                })
+                # Compute custom calibration loss with ground truth
+                calibration_loss = compute_calibration_loss(refined_boxes, refined_logits, labels, device)
+                
+                # Add original MoE loss for stability
+                total_loss = calibration_loss
+                if moe_output.loss is not None:
+                    total_loss = total_loss + 0.1 * moe_output.loss.detach()
+                
+                if torch.isfinite(total_loss) and total_loss > 0:
+                    total_loss.backward()
+                    
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(calibrated_model.calibration.parameters(), max_norm=0.5)
+                    
+                    optimizer.step()
+                    
+                    train_loss += total_loss.item()
+                    train_steps += 1
+                    
+                    train_pbar.set_postfix({
+                        'Loss': f"{total_loss.item():.4f}",
+                        'Avg': f"{train_loss/train_steps:.4f}"
+                    })
+                    
+            except Exception as e:
+                print(f"Error in training step: {e}")
+                continue
         
         avg_train_loss = train_loss / max(train_steps, 1)
         
@@ -594,48 +456,68 @@ def train_calibration_layer(config, device, expert_weights_dir, epochs=15):
         with torch.no_grad():
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]")
             for batch in val_pbar:
-                pixel_values = batch['pixel_values'].to(device)
-                labels = batch['labels']
-                
-                outputs = calibrated_model(pixel_values, labels=labels)
-                loss = outputs.loss
-                
-                if loss is not None and torch.isfinite(loss):
-                    val_loss += loss.item()
-                    val_steps += 1
-                
-                val_pbar.set_postfix({
-                    'Loss': f"{loss.item() if loss is not None else 0:.4f}",
-                    'Avg': f"{val_loss/max(val_steps,1):.4f}"
-                })
+                try:
+                    pixel_values = batch['pixel_values']
+                    labels = batch['labels']
+                    
+                    # Get MoE output
+                    moe_output = calibrated_model.moe(pixel_values, labels=labels)
+                    
+                    # Apply calibration
+                    refined_boxes, refined_logits = calibrated_model.calibration(
+                        moe_output.pred_boxes, 
+                        moe_output.logits
+                    )
+                    
+                    # Compute validation loss
+                    calibration_loss = compute_calibration_loss(refined_boxes, refined_logits, labels, device)
+                    
+                    if torch.isfinite(calibration_loss):
+                        val_loss += calibration_loss.item()
+                        val_steps += 1
+                    
+                    val_pbar.set_postfix({
+                        'Loss': f"{calibration_loss.item():.4f}",
+                        'Avg': f"{val_loss/max(val_steps,1):.4f}"
+                    })
+                    
+                except Exception as e:
+                    print(f"Error in validation step: {e}")
+                    continue
         
         avg_val_loss = val_loss / max(val_steps, 1)
         
         # Learning rate scheduling
-        scheduler.step(avg_val_loss)
+        if val_steps > 0:
+            scheduler.step(avg_val_loss)
         
         print(f"\nEpoch {epoch+1}/{epochs}:")
-        print(f"  Train Loss: {avg_train_loss:.4f}")
-        print(f"  Val Loss: {avg_val_loss:.4f}")
+        print(f"  Train Loss: {avg_train_loss:.4f} ({train_steps} steps)")
+        print(f"  Val Loss: {avg_val_loss:.4f} ({val_steps} steps)")
         print(f"  Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
         
         # Save best model
-        if avg_val_loss < best_val_loss:
+        if val_steps > 0 and avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
             
             # Save calibration layer
-            calibration_path = os.path.join(calibrated_save_dir, 'calibration_best.pth')
+            calibration_path = os.path.join(calibrated_save_dir, f'calibration_best_{dataset_name}.pth')
             torch.save(calibrated_model.calibration.state_dict(), calibration_path)
             
             # Save complete model
-            complete_model_path = os.path.join(calibrated_save_dir, 'calibrated_moe_best.pth')
+            complete_model_path = os.path.join(calibrated_save_dir, f'calibrated_moe_best_{dataset_name}.pth')
             torch.save({
                 'calibration_state_dict': calibrated_model.calibration.state_dict(),
+                'dataset_name': dataset_name,
                 'epoch': epoch,
                 'best_val_loss': best_val_loss,
                 'config': config
             }, complete_model_path)
+            
+            # Save in standard format
+            standard_save_dir = os.path.join(calibrated_save_dir, f'standard_{dataset_name}')
+            save_calibrated_moe_model(calibrated_model, image_processor, standard_save_dir, dataset_name)
             
             print(f"  ✅ New best model saved! Val Loss: {avg_val_loss:.4f}")
         else:
@@ -649,23 +531,17 @@ def train_calibration_layer(config, device, expert_weights_dir, epochs=15):
         
         print("-" * 50)
     
-    # Save final model
-    calibration_final_path = os.path.join(calibrated_save_dir, 'calibration_final.pth')
-    torch.save(calibrated_model.calibration.state_dict(), calibration_final_path)
-    
-    complete_final_path = os.path.join(calibrated_save_dir, 'calibrated_moe_final.pth')
-    torch.save({
-        'calibration_state_dict': calibrated_model.calibration.state_dict(),
-        'epoch': epochs,
-        'final_val_loss': avg_val_loss,
-        'config': config
-    }, complete_final_path)
+    # Save final model in standard format
+    final_standard_dir = os.path.join(calibrated_save_dir, f'final_{dataset_name}')
+    save_calibrated_moe_model(calibrated_model, image_processor, final_standard_dir, dataset_name)
     
     print(f"\n" + "="*60)
     print("CALIBRATION TRAINING COMPLETED!")
     print(f"Best validation loss: {best_val_loss:.4f}")
+    print(f"Dataset: {dataset_name}")
     print(f"Calibration layer saved to: {calibration_path}")
     print(f"Complete model saved to: {complete_model_path}")
+    print(f"Standard format saved to: {final_standard_dir}")
     print("="*60)
     
     return calibrated_model, best_val_loss
@@ -681,14 +557,14 @@ def evaluate_calibrated_moe(config, device, dataset_name, expert_weights_dir):
     
     # Load calibration layer
     calibrated_save_dir = os.path.join(expert_weights_dir, 'moec_MOMO')
-    calibration_path = os.path.join(calibrated_save_dir, 'calibration_best.pth')
+    calibration_path = os.path.join(calibrated_save_dir, f'calibration_best_{dataset_name}.pth')
     
     if not os.path.exists(calibration_path):
-        calibration_final_path = os.path.join(calibrated_save_dir, 'calibration_final.pth')
+        calibration_final_path = os.path.join(calibrated_save_dir, f'calibration_final_{dataset_name}.pth')
         if os.path.exists(calibration_final_path):
             calibration_path = calibration_final_path
         else:
-            raise FileNotFoundError(f"No calibration layer found in {calibrated_save_dir}. Run training first.")
+            raise FileNotFoundError(f"No calibration layer found for {dataset_name} in {calibrated_save_dir}. Run training first.")
     
     # Create calibrated model
     calibration_layer = BoundingBoxCalibrationLayer(device=device).to(device)
@@ -784,48 +660,45 @@ def main(config_path, epoch=None, dataset=None, weight_dir=None, test=False):
             print(f"Evaluation failed: {e}")
             return {'error': str(e)}
     else:
-        # Training mode
+        # Training mode - require dataset specification
+        if not dataset:
+            print("Error: Please specify --dataset for calibration training")
+            print("Available datasets: CSAW, DMID, DDSM")
+            return {'error': 'Dataset not specified'}
+        
         epochs = epoch if epoch else 15
-        print(f"Training calibration layer for {epochs} epochs...")
+        print(f"Training calibration layer for {epochs} epochs on {dataset} dataset...")
         
         try:
-            # Train calibration layer
+            # Train calibration layer on specific dataset
             calibrated_model, best_loss = train_calibration_layer(
-                config, device, expert_weights_dir, epochs
+                config, device, expert_weights_dir, dataset, epochs
             )
             
             print(f"\nCalibration training completed with best loss: {best_loss:.4f}")
             
-            # Test on specified dataset or all datasets
-            if dataset:
-                target_datasets = [dataset]
-            else:
-                target_datasets = ['CSAW', 'DMID', 'DDSM']
+            # Test on the same dataset
+            print(f"\nTesting calibrated MoE on: {dataset}")
             
-            print(f"\nTesting calibrated MoE on: {target_datasets}")
-            all_results = {}
-            
-            for test_dataset in target_datasets:
-                print(f"\n{'='*50}")
-                print(f"Testing Calibrated MoE on {test_dataset}")
-                print('='*50)
-                
-                try:
-                    calibrated_results, original_results = evaluate_calibrated_moe(
-                        config, device, test_dataset, expert_weights_dir
-                    )
-                    all_results[test_dataset] = {
+            try:
+                calibrated_results, original_results = evaluate_calibrated_moe(
+                    config, device, dataset, expert_weights_dir
+                )
+                all_results = {
+                    dataset: {
                         'calibrated': calibrated_results,
                         'original': original_results
                     }
-                except Exception as e:
-                    print(f"Evaluation on {test_dataset} failed: {e}")
-                    all_results[test_dataset] = {'error': str(e)}
+                }
+            except Exception as e:
+                print(f"Evaluation on {dataset} failed: {e}")
+                all_results = {dataset: {'error': str(e)}}
             
             print(f"\n" + "="*60)
             print("CALIBRATED MOE TRAINING & TESTING COMPLETED!")
             print("✅ Calibration layer trained and saved")
             print("✅ Performance comparison completed")
+            print(f"✅ Trained on dataset: {dataset}")
             print("="*60)
             
             return all_results
