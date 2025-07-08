@@ -145,10 +145,11 @@ class SimpleMoE(nn.Module):
             dataset_logits = self.classifier(pixel_values)
             expert_choices = torch.argmax(dataset_logits, dim=1)
         
-        # 2. Update statistics (always update, not just during eval)
-        for choice in expert_choices:
-            self.routing_counts[choice] += 1
-        self.total_routed += batch_size
+        # 2. Update statistics
+        if not self.training:
+            for choice in expert_choices:
+                self.routing_counts[choice] += 1
+            self.total_routed += batch_size
         
         # 3. Group by expert
         expert_groups = {}
@@ -158,22 +159,20 @@ class SimpleMoE(nn.Module):
                 expert_groups[expert_idx] = []
             expert_groups[expert_idx].append(i)
         
-        # 4. Get expert outputs - IMPORTANT: Use labels=None during inference to avoid device issues
+        # 4. Get expert outputs
         sample_to_output = {}
-        total_loss = torch.tensor(0.0, device=self.device, requires_grad=False)
+        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         for expert_idx, sample_indices in expert_groups.items():
             expert_pixel_values = pixel_values[sample_indices]
             expert_labels = None
-            # Only pass labels during training and if provided
-            if labels is not None and self.training:
+            if labels is not None:
                 expert_labels = [labels[i] for i in sample_indices]
             
             with torch.no_grad():
                 self.experts[expert_idx].eval()
                 expert_output = self.experts[expert_idx](expert_pixel_values, labels=expert_labels)
             
-            # Only accumulate loss if we computed it
             if hasattr(expert_output, 'loss') and expert_output.loss is not None:
                 weight = len(sample_indices) / batch_size
                 total_loss = total_loss + expert_output.loss * weight
@@ -184,39 +183,33 @@ class SimpleMoE(nn.Module):
                     'pred_boxes': expert_output.pred_boxes[i].clone(),
                 }
         
-        # 5. Reconstruct batch - ensure we handle all samples
+        # 5. Reconstruct batch
         batch_logits = []
         batch_pred_boxes = []
         
-        if sample_to_output:
-            first_sample_idx = list(sample_to_output.keys())[0]
-            ref_logits_shape = sample_to_output[first_sample_idx]['logits'].shape
-            ref_boxes_shape = sample_to_output[first_sample_idx]['pred_boxes'].shape
-            
-            for i in range(batch_size):
-                if i in sample_to_output:
-                    batch_logits.append(sample_to_output[i]['logits'])
-                    batch_pred_boxes.append(sample_to_output[i]['pred_boxes'])
-                else:
-                    # Create dummy outputs for missing samples
-                    dummy_logits = torch.zeros(ref_logits_shape, device=pixel_values.device)
-                    dummy_boxes = torch.zeros(ref_boxes_shape, device=pixel_values.device)
-                    batch_logits.append(dummy_logits)
-                    batch_pred_boxes.append(dummy_boxes)
-            
-            batch_logits = torch.stack(batch_logits, dim=0)
-            batch_pred_boxes = torch.stack(batch_pred_boxes, dim=0)
-            batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
-        else:
-            # Fallback if no samples were processed
-            batch_logits = torch.zeros((batch_size, 100, 2), device=pixel_values.device)
-            batch_pred_boxes = torch.zeros((batch_size, 100, 4), device=pixel_values.device)
+        first_sample_idx = list(sample_to_output.keys())[0]
+        ref_logits_shape = sample_to_output[first_sample_idx]['logits'].shape
+        ref_boxes_shape = sample_to_output[first_sample_idx]['pred_boxes'].shape
+        
+        for i in range(batch_size):
+            if i in sample_to_output:
+                batch_logits.append(sample_to_output[i]['logits'])
+                batch_pred_boxes.append(sample_to_output[i]['pred_boxes'])
+            else:
+                dummy_logits = torch.zeros(ref_logits_shape, device=pixel_values.device)
+                dummy_boxes = torch.zeros(ref_boxes_shape, device=pixel_values.device)
+                batch_logits.append(dummy_logits)
+                batch_pred_boxes.append(dummy_boxes)
+        
+        batch_logits = torch.stack(batch_logits, dim=0)
+        batch_pred_boxes = torch.stack(batch_pred_boxes, dim=0)
+        batch_pred_boxes = batch_pred_boxes[..., :4].contiguous()
         
         # 6. Create output
         from transformers.models.yolos.modeling_yolos import YolosObjectDetectionOutput
         
         final_loss = None
-        if labels is not None and self.training:
+        if labels is not None:
             final_loss = total_loss
         
         combined_output = YolosObjectDetectionOutput(
