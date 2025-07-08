@@ -45,49 +45,30 @@ from train_moe3 import (
 
 class BoundingBoxCalibrationLayer(nn.Module):
     """Calibration layer to refine bounding box predictions."""
-    def __init__(self, input_dim=4, hidden_dim=128, device='cuda'):
+    def __init__(self, input_dim=4, hidden_dim=64, device='cuda'):
         super().__init__()
         self.device = device
         
-        # Multi-layer refinement network for bounding boxes
+        # Simpler, smaller refinement network for bounding boxes
         self.box_refiner = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim),
-            nn.Dropout(0.2),
-            
-            nn.Linear(hidden_dim, hidden_dim * 2),
-            nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim * 2),
-            nn.Dropout(0.3),
-            
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.BatchNorm1d(hidden_dim),
-            nn.Dropout(0.2),
-            
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, input_dim),
             nn.Tanh()  # Output refinement deltas in [-1, 1]
         )
         
-        # Confidence calibration for logits
+        # Simpler confidence calibration for logits
         self.logits_calibrator = nn.Sequential(
-            nn.Linear(2, 64),  # Assuming 2 classes (background, cancer)
+            nn.Linear(2, 32),
             nn.ReLU(),
-            nn.BatchNorm1d(64),
             nn.Dropout(0.1),
-            
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.BatchNorm1d(32),
-            nn.Dropout(0.1),
-            
             nn.Linear(32, 2),
         )
         
-        # Learnable refinement weights
-        self.box_refine_weight = nn.Parameter(torch.tensor(0.1))
-        self.logits_refine_weight = nn.Parameter(torch.tensor(0.1))
+        # Much smaller refinement weights to avoid destroying predictions
+        self.box_refine_weight = nn.Parameter(torch.tensor(0.01))  # Reduced from 0.1
+        self.logits_refine_weight = nn.Parameter(torch.tensor(0.01))  # Reduced from 0.1
         
         self._initialize_weights()
     
@@ -95,15 +76,13 @@ class BoundingBoxCalibrationLayer(nn.Module):
         """Initialize weights properly."""
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
+                # Use smaller initialization
+                nn.init.xavier_uniform_(m.weight, gain=0.1)
                 nn.init.zeros_(m.bias)
     
     def forward(self, pred_boxes, logits):
         """
-        Refine predictions.
+        Refine predictions with minimal changes.
         
         Args:
             pred_boxes: [batch_size, num_queries, 4] - original box predictions
@@ -119,14 +98,14 @@ class BoundingBoxCalibrationLayer(nn.Module):
         flat_boxes = pred_boxes.view(-1, 4)  # [batch_size * num_queries, 4]
         flat_logits = logits.view(-1, logits.size(-1))  # [batch_size * num_queries, num_classes]
         
-        # Refine bounding boxes
+        # Refine bounding boxes with small adjustments
         box_deltas = self.box_refiner(flat_boxes)
         refined_flat_boxes = flat_boxes + self.box_refine_weight * box_deltas
         
         # Clamp refined boxes to valid range [0, 1]
         refined_flat_boxes = torch.clamp(refined_flat_boxes, 0.0, 1.0)
         
-        # Refine logits
+        # Refine logits with small adjustments
         logits_deltas = self.logits_calibrator(flat_logits)
         refined_flat_logits = flat_logits + self.logits_refine_weight * logits_deltas
         
@@ -360,40 +339,44 @@ def compute_calibration_loss(pred_boxes, pred_logits, target_labels, device):
                         if isinstance(boxes, torch.Tensor):
                             boxes = boxes.detach().clone().to(device)
                         elif isinstance(boxes, (list, tuple)):
-                            # Convert to tensor ensuring it's on the correct device
                             try:
                                 boxes = torch.tensor(boxes, dtype=torch.float32, device=device)
                             except:
-                                continue  # Skip malformed boxes
+                                continue
                         else:
-                            continue  # Skip unsupported formats
+                            continue
                         
                         # Ensure proper shape: should be [N, 4] or [4]
                         if boxes.dim() == 1:
                             if len(boxes) == 4:
                                 boxes = boxes.unsqueeze(0)  # [1, 4]
                             else:
-                                continue  # Skip invalid boxes
+                                continue
                         elif boxes.dim() == 2:
                             if boxes.shape[1] != 4:
-                                continue  # Skip invalid boxes
+                                continue
                         else:
-                            continue  # Skip invalid boxes
+                            continue
                         
                         # Ensure boxes are in valid range [0, 1]
                         boxes = torch.clamp(boxes, 0.0, 1.0)
                         
-                        # Calculate loss for this target
+                        # Calculate loss for this target - use IoU-based loss
                         num_boxes = boxes.shape[0]
-                        num_preds = min(num_boxes, pred_boxes.shape[1])
+                        # Only use top predictions (most confident ones)
+                        num_preds = min(num_boxes, 10)  # Reduced from using all queries
                         
                         if num_preds > 0:
-                            # Get predictions for this sample and ensure on correct device
-                            sample_pred = pred_boxes[i, :num_preds].to(device)
+                            # Get top predictions based on confidence
+                            sample_logits = pred_logits[i]  # [num_queries, 2]
+                            confidence_scores = torch.softmax(sample_logits, dim=-1)[:, 1]  # Cancer class
+                            _, top_indices = torch.topk(confidence_scores, k=num_preds)
+                            
+                            sample_pred = pred_boxes[i, top_indices].to(device)
                             sample_target = boxes[:num_preds].to(device)
                             
-                            # Compute L1 loss
-                            box_loss = F.l1_loss(sample_pred, sample_target, reduction='mean')
+                            # Use Smooth L1 loss instead of L1 for better gradient flow
+                            box_loss = F.smooth_l1_loss(sample_pred, sample_target, reduction='mean')
                             sample_loss = sample_loss + box_loss
                             sample_targets += 1
                 
@@ -404,7 +387,6 @@ def compute_calibration_loss(pred_boxes, pred_logits, target_labels, device):
                     
             except Exception as e:
                 # Skip problematic samples
-                print(f"Warning: Skipping sample {i} in loss computation: {e}")
                 continue
     
     # Normalize by number of valid samples
@@ -412,8 +394,8 @@ def compute_calibration_loss(pred_boxes, pred_logits, target_labels, device):
         total_loss = total_loss / valid_samples
         total_loss.requires_grad_(True)
     else:
-        # Return a small loss if no valid samples
-        total_loss = torch.tensor(0.001, device=device, requires_grad=True)
+        # Return a very small loss if no valid samples
+        total_loss = torch.tensor(1e-6, device=device, requires_grad=True)
     
     return total_loss
 
@@ -465,6 +447,24 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
     moe_model, image_processor = load_pretrained_moe(expert_weights_dir, device)
     print("✅ Pre-trained MoE loaded successfully")
     
+    # Test MoE performance first
+    print("Testing original MoE performance...")
+    test_dataset = BreastCancerDataset(
+        split='test',
+        splits_dir=Path(config.get('dataset', {}).get('splits_dir', '/content/dataset')),
+        dataset_name=dataset_name,
+        image_processor=image_processor,
+        model_type=get_model_type(config.get('model', {}).get('model_name', 'hustvl/yolos-base')),
+    )
+    
+    moe_test_metrics = run_model_inference_with_map(moe_model, test_dataset, image_processor, device)
+    original_map50 = moe_test_metrics.get('map_50', 0.0)
+    print(f"Original MoE mAP@50: {original_map50:.4f}")
+    
+    if original_map50 < 0.1:
+        print("⚠️ WARNING: Original MoE performance is very low! Check routing logic.")
+        return None, 0.0
+    
     # Create calibration layer
     calibration_layer = BoundingBoxCalibrationLayer(device=device).to(device)
     print("✅ Calibration layer initialized")
@@ -514,11 +514,11 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
         pin_memory=False
     )
     
-    # Training setup
+    # Training setup - use smaller learning rate to avoid destroying predictions
     optimizer = torch.optim.AdamW(
         calibrated_model.calibration.parameters(), 
-        lr=1e-4,  # Slightly higher learning rate for better convergence
-        weight_decay=1e-5
+        lr=5e-5,  # Smaller learning rate
+        weight_decay=1e-6
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', patience=2, factor=0.7, verbose=True
