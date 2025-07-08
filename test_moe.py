@@ -97,23 +97,82 @@ def get_all_metrics(model, test_dataset, image_processor, device, model_name):
 
 def load_model_safe(model_dir, device):
     """Safely load model, handling both standard and custom MoE models."""
+    model_dir = Path(model_dir)
+    
+    # Check if config.json exists to determine model type
+    config_path = model_dir / "config.json"
+    if config_path.exists():
+        import json
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        model_type = config.get('model_type', '')
+        
+        if model_type == 'simple_moe' or 'moe' in str(model_dir).lower():
+            print(f"Detected MoE model, loading with custom loader: {model_dir}")
+            # Try multiple ways to load MoE model
+            
+            # Method 1: Try custom SimpleMoEModel if available
+            if SimpleMoEModel is not None:
+                try:
+                    model = SimpleMoEModel.from_pretrained(str(model_dir))
+                    return model.to(device)
+                except Exception as e:
+                    print(f"SimpleMoEModel loading failed: {e}")
+            
+            # Method 2: Try loading with torch.load
+            try:
+                pytorch_model_path = model_dir / "pytorch_model.bin"
+                if pytorch_model_path.exists():
+                    state_dict = torch.load(pytorch_model_path, map_location=device)
+                    # You may need to instantiate the model architecture here
+                    # based on how train_moe3.py does it
+                    print("Loaded MoE model state dict successfully")
+                    # This would need the model architecture to be defined
+                    # model = YourMoEModelClass(config)
+                    # model.load_state_dict(state_dict)
+                    # return model.to(device)
+                except Exception as e:
+                    print(f"PyTorch model loading failed: {e}")
+            
+            # Method 3: Try loading as safetensors
+            try:
+                safetensors_path = model_dir / "model.safetensors"
+                if safetensors_path.exists():
+                    from safetensors.torch import load_file
+                    state_dict = load_file(safetensors_path)
+                    # Same issue - need model architecture
+                    print("Loaded MoE model from safetensors")
+                except Exception as e:
+                    print(f"Safetensors loading failed: {e}")
+    
+    # Fallback to standard transformers loading
     try:
-        # First try loading as standard transformers model
+        print(f"Loading as standard transformers model: {model_dir}")
         model = AutoModelForObjectDetection.from_pretrained(
-            model_dir,
+            str(model_dir),
             id2label={0: 'cancer'},
             label2id={'cancer': 0},
             auxiliary_loss=False,
+            trust_remote_code=True,  # Allow custom code
         )
         return model.to(device)
     except Exception as e:
-        if "simple_moe" in str(e) and SimpleMoEModel is not None:
-            print(f"Loading as custom MoE model: {model_dir}")
-            # Load custom MoE model
-            model = SimpleMoEModel.from_pretrained(model_dir)
+        print(f"Standard loading failed: {e}")
+        
+        # Last resort: try with local_files_only=False and trust_remote_code=True
+        try:
+            model = AutoModelForObjectDetection.from_pretrained(
+                str(model_dir),
+                id2label={0: 'cancer'},
+                label2id={'cancer': 0},
+                auxiliary_loss=False,
+                trust_remote_code=True,
+                local_files_only=False,
+            )
             return model.to(device)
-        else:
-            raise e
+        except Exception as e2:
+            raise Exception(f"All model loading methods failed. Original error: {e}, Fallback error: {e2}")
 
 def run_test_with_new_metrics(config_path, dataset_name, model_dir, epoch=None):
     """Test model using new metrics function (like test_all.py but with new metrics)."""
