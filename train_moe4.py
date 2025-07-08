@@ -557,10 +557,11 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
                 
                 optimizer.zero_grad()
                 
-                # Get MoE output first (frozen) - ensure everything is on device
+                # Get MoE output in INFERENCE MODE ONLY (no labels to avoid device issues)
                 with torch.no_grad():
                     calibrated_model.moe.eval()
-                    moe_output = calibrated_model.moe(pixel_values, labels=labels)
+                    # Pass None for labels to avoid loss computation which causes device mismatch
+                    moe_output = calibrated_model.moe(pixel_values, labels=None)
                 
                 # Ensure MoE outputs are on the correct device and detached
                 moe_pred_boxes = moe_output.pred_boxes.detach().to(device, non_blocking=True)
@@ -629,8 +630,8 @@ def train_calibration_layer(config, device, expert_weights_dir, dataset_name, ep
                     pixel_values = batch['pixel_values'].to(device)
                     labels = batch['labels']
                     
-                    # Get MoE output
-                    moe_output = calibrated_model.moe(pixel_values, labels=labels)
+                    # Get MoE output in INFERENCE MODE ONLY
+                    moe_output = calibrated_model.moe(pixel_values, labels=None)
                     
                     # Ensure outputs are on correct device
                     moe_pred_boxes = moe_output.pred_boxes.to(device)
