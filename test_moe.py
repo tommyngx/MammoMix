@@ -44,6 +44,13 @@ from transformers import (
     TrainingArguments,
     Trainer,
 )
+
+# Add import for custom MoE model
+try:
+    from models.moe_model import SimpleMoEModel  # Adjust import path as needed
+except ImportError:
+    SimpleMoEModel = None
+
 from dataset import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn, run_model_inference_with_map
@@ -88,6 +95,26 @@ def get_all_metrics(model, test_dataset, image_processor, device, model_name):
     
     return all_metrics
 
+def load_model_safe(model_dir, device):
+    """Safely load model, handling both standard and custom MoE models."""
+    try:
+        # First try loading as standard transformers model
+        model = AutoModelForObjectDetection.from_pretrained(
+            model_dir,
+            id2label={0: 'cancer'},
+            label2id={'cancer': 0},
+            auxiliary_loss=False,
+        )
+        return model.to(device)
+    except Exception as e:
+        if "simple_moe" in str(e) and SimpleMoEModel is not None:
+            print(f"Loading as custom MoE model: {model_dir}")
+            # Load custom MoE model
+            model = SimpleMoEModel.from_pretrained(model_dir)
+            return model.to(device)
+        else:
+            raise e
+
 def run_test_with_new_metrics(config_path, dataset_name, model_dir, epoch=None):
     """Test model using new metrics function (like test_all.py but with new metrics)."""
     config = load_config(config_path)
@@ -96,15 +123,9 @@ def run_test_with_new_metrics(config_path, dataset_name, model_dir, epoch=None):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load model and processor from the specified directory (same as test_all.py)
+    # Load model and processor from the specified directory
     image_processor = AutoImageProcessor.from_pretrained(model_dir)
-    model = AutoModelForObjectDetection.from_pretrained(
-        model_dir,
-        id2label={0: 'cancer'},
-        label2id={'cancer': 0},
-        auxiliary_loss=False,
-    )
-    model = model.to(device)
+    model = load_model_safe(model_dir, device)
     model.eval()
 
     # Create test dataset (same as test_all.py)
