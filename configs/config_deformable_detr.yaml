@@ -1,0 +1,72 @@
+# Training configuration for BreastDet with Deformable DETR
+
+dataset:
+  name: CSAW
+  splits_dir: ../dataset
+  max_size: 800  # Increased for better performance with Deformable DETR
+
+model:
+  model_name: SenseTime/deformable-detr
+
+data:
+  train_dir: train
+  val_dir: val
+  test_dir: test
+  batch_size: 4  # Reduced due to higher memory usage of Deformable DETR
+  num_workers: 4
+  image_size: 800  # Standard size for Deformable DETR
+
+training:
+  output_dir: ../tmp
+  epochs: 50  # Deformable DETR typically needs more epochs
+  batch_size: 4
+  learning_rate: 0.0001  # Conservative learning rate
+  weight_decay: 0.0001
+  warmup_ratio: 0.1  # Longer warmup for stability
+  lr_scheduler_type: cosine_with_restarts
+  lr_scheduler_kwargs:
+    num_cycles: 2
+  eval_do_concat_batches: false
+  evaluation_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 2
+  logging_strategy: steps
+  logging_steps: 50
+  load_best_model_at_end: true
+  metric_for_best_model: eval_map_50
+  greater_is_better: true
+  dataloader_num_workers: 4
+  gradient_accumulation_steps: 4  # Increased to compensate for smaller batch size
+  remove_unused_columns: false
+  fp16: true  # Enable mixed precision for memory efficiency
+  gradient_checkpointing: true  # Save memory
+  max_grad_norm: 0.1  # Gradient clipping for stability
+
+# Deformable DETR specific settings
+deformable_detr:
+  num_queries: 300  # Number of object queries
+  num_feature_levels: 4  # Multi-scale feature levels
+  dec_n_points: 4  # Number of sampling points in decoder
+  enc_n_points: 4  # Number of sampling points in encoder
+  with_box_refine: true  # Enable iterative bounding box refinement
+  two_stage: true  # Enable two-stage training
+
+logging:
+  use_wandb: true
+  wandb_project: MammoMix_DeformableDETR
+  log_interval: 10
+
+seed: 42
+
+wandb:
+  wandb_dir: ../wandb
+
+# Data augmentation for Deformable DETR
+augmentation:
+  horizontal_flip_prob: 0.5
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.1
+  max_size: 1333  # Maximum image size during training
+  scales: [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]  # Multi-scale training
