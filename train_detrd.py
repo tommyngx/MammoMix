@@ -21,7 +21,7 @@ from transformers import AutoImageProcessor, AutoModelForObjectDetection, Traini
 from train import load_config
 from dataset import BreastCancerDataset, collate_fn
 from utils import get_image_processor, get_model_type
-from evaluation import get_eval_compute_metrics_fn, calculate_custom_map_metrics
+from evaluation import get_eval_compute_metrics_fn
 
 def load_deformable_detr_model(model_name, config):
     """Load Deformable DETR model with proper configuration."""
@@ -186,10 +186,10 @@ def main(config_path, epoch=None, dataset=None):
     print("\n⚙️ Setting up training...")
     training_args = create_deformable_training_args(config, DATASET_NAME, epoch)
     
-    # Create compute metrics function (not used in Trainer for custom mAP)
+    # Create compute metrics function
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
-
-    # Create trainer WITHOUT compute_metrics for custom evaluation
+    
+    # Create trainer
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -197,9 +197,9 @@ def main(config_path, epoch=None, dataset=None):
         eval_dataset=val_dataset,
         processing_class=image_processor,
         data_collator=collate_fn,
-        # compute_metrics=eval_compute_metrics_fn,  # REMOVE this line for custom eval
+        compute_metrics=eval_compute_metrics_fn,
     )
-
+    
     # Start training
     print("\n🏋️ Starting training...")
     print("="*50)
@@ -221,20 +221,19 @@ def main(config_path, epoch=None, dataset=None):
             dataset_name=DATASET_NAME,
             image_processor=image_processor,
             model_type=get_model_type(MODEL_NAME),
+            # Remove dataset_epoch=epoch
         )
         
-        # Use custom mAP calculation
-        print("\n🔎 Calculating custom mAP metrics...")
-        map_metrics = calculate_custom_map_metrics(
-            model, test_dataset, image_processor, device
-        )
-        print(f"\n🎯 Custom Test mAP Results:")
+        test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
+        
+        print(f"\n🎯 Test Results:")
         print("-" * 30)
-        for key, value in map_metrics.items():
+        for key, value in test_results.items():
             print(f"{key}: {value}")
         
+        # Summary
         print(f"\n🎉 Training completed successfully!")
-        print(f"Best mAP@50: {map_metrics.get('map_50', 'N/A')}")
+        print(f"Best mAP@50: {test_results.get('test_map_50', 'N/A')}")
         print(f"Model saved: {save_path}")
         
     except Exception as e:
