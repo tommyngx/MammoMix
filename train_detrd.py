@@ -23,6 +23,7 @@ from dataset import BreastCancerDataset, collate_fn
 from utils import get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn, calculate_custom_map_metrics
 
+
 def load_deformable_detr_model(model_name, config):
     """Load Deformable DETR model with proper configuration."""
     print(f"🔧 Loading Deformable DETR: {model_name}")
