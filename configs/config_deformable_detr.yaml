@@ -12,46 +12,54 @@ data:
   train_dir: train
   val_dir: val
   test_dir: test
-  batch_size: 2  # Even smaller batch size
-  num_workers: 2
+  batch_size: 1  # Minimum batch size để tránh OOM
+  num_workers: 0  # Disable multiprocessing để tránh conflicts
   image_size: 800
 
 training:
   output_dir: ../tmp
-  epochs: 100  # Much more epochs for convergence
-  batch_size: 2
-  learning_rate: 0.0002  # Higher learning rate
-  weight_decay: 0.0001
-  warmup_ratio: 0.05  # Shorter warmup
-  lr_scheduler_type: linear  # Simple linear scheduler
+  epochs: 50  # Giảm epochs để test trước
+  batch_size: 1
+  learning_rate: 0.0005  # Tăng learning rate để học nhanh hơn
+  weight_decay: 0.00001  # Giảm weight decay
+  warmup_ratio: 0.1  # Tăng warmup để ổn định
+  lr_scheduler_type: cosine  # Cosine scheduler thường tốt hơn cho detection
   eval_do_concat_batches: false
-  evaluation_strategy: epoch
-  save_strategy: epoch
-  save_total_limit: 3
+  evaluation_strategy: steps
+  eval_steps: 50  # Evaluate thường xuyên hơn
+  save_strategy: steps
+  save_steps: 50
+  save_total_limit: 2
   logging_strategy: steps
-  logging_steps: 25  # More frequent logging
+  logging_steps: 10  # Log thường xuyên để monitor
   load_best_model_at_end: true
   metric_for_best_model: eval_map_50
   greater_is_better: true
-  dataloader_num_workers: 2
-  gradient_accumulation_steps: 16  # Much higher accumulation for effective batch size 32
+  dataloader_num_workers: 0
+  gradient_accumulation_steps: 32  # Rất cao để compensate batch size = 1
   remove_unused_columns: false
-  fp16: true
-  gradient_checkpointing: false  # Disable for stability
-  max_grad_norm: 1.0  # Higher gradient clipping
+  fp16: false  # Disable FP16 để stability
+  gradient_checkpointing: false
+  max_grad_norm: 5.0  # Tăng để tránh gradient explosion
 
-  # Additional training stability settings
-  label_smoothing_factor: 0.1
-  prediction_loss_only: false
-  greater_is_better: true
-  metric_for_best_model: eval_map_50
+  # Thêm các setting để suppress warnings và improve stability
+  ignore_data_skip: true
+  push_to_hub: false
+  hub_model_id: null
+  hub_strategy: "every_save"
+  hub_token: null
+  hub_private_repo: false
 
-  # Early stopping to prevent overfitting
-  early_stopping_patience: 15
-  early_stopping_threshold: 0.001
+  # Loss và optimization settings
+  label_smoothing_factor: 0.0  # Disable label smoothing cho detection
+  optim: "adamw_torch"  # Explicit optimizer
+
+  # Data loading settings
+  dataloader_drop_last: false
+  dataloader_pin_memory: false
 
 logging:
-  use_wandb: true
+  use_wandb: false  # Disable wandb để focus vào training
   wandb_project: MammoMix_DeformableDETR
   log_interval: 5
 
@@ -60,16 +68,17 @@ seed: 42
 wandb:
   wandb_dir: ../wandb
 
-# Specific settings to help with learning
-optimizer:
-  type: AdamW
-  lr: 0.0002
-  weight_decay: 0.0001
-  betas: [0.9, 0.999]
-  eps: 1e-8
+# Environment settings để suppress warnings
+environment:
+  suppress_warnings: true
+  pytorch_warnings: false
+  transformers_warnings: false
 
-# Loss function weights (if supported)
-loss_weights:
-  bbox_loss_coef: 5.0  # Higher weight for bbox regression
-  giou_loss_coef: 2.0  # Higher weight for GIoU loss
-  class_loss_coef: 1.0  # Standard weight for classification
+# Model loading settings
+model_loading:
+  low_cpu_mem_usage: true
+  torch_dtype: "auto"
+  device_map: null
+  trust_remote_code: false
+  revision: "main"
+  use_safetensors: true
