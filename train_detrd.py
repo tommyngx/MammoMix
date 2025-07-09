@@ -83,11 +83,16 @@ def create_deformable_training_args(config, dataset_name, epoch_override=None):
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"DeformableDETR_{dataset_name}_{date_str}"
     
+    # Use a metric that always exists for best model selection (e.g. 'eval_loss')
+    metric_for_best_model = training_cfg.get('metric_for_best_model', 'eval_loss')
+    if metric_for_best_model not in ['eval_loss', 'eval_runtime', 'eval_samples_per_second', 'eval_steps_per_second', 'epoch']:
+        metric_for_best_model = 'eval_loss'
+    
     # Training arguments optimized for Deformable DETR
     training_args = TrainingArguments(
         output_dir=training_cfg.get('output_dir', '../tmp'),
         run_name=run_name,
-        num_train_epochs=epochs,  # Use the corrected epochs value
+        num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
@@ -109,8 +114,8 @@ def create_deformable_training_args(config, dataset_name, epoch_override=None):
         
         # Model selection
         load_best_model_at_end=training_cfg.get('load_best_model_at_end', True),
-        metric_for_best_model=training_cfg.get('metric_for_best_model', 'eval_map_50'),
-        greater_is_better=training_cfg.get('greater_is_better', True),
+        metric_for_best_model=metric_for_best_model,
+        greater_is_better=training_cfg.get('greater_is_better', False),  # For loss, lower is better
         
         # Optimization for stability
         fp16=False,  # Disable FP16 for Deformable DETR stability
