@@ -188,8 +188,8 @@ def main(config_path, epoch=None, dataset=None):
     
     # Create compute metrics function (not used in Trainer for custom mAP)
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
-    
-    # Create trainer WITHOUT compute_metrics (to avoid Trainer's default eval)
+
+    # Create trainer WITHOUT compute_metrics for custom evaluation
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -197,9 +197,9 @@ def main(config_path, epoch=None, dataset=None):
         eval_dataset=val_dataset,
         processing_class=image_processor,
         data_collator=collate_fn,
-        # compute_metrics=eval_compute_metrics_fn,  # REMOVE this line
+        # compute_metrics=eval_compute_metrics_fn,  # REMOVE this line for custom eval
     )
-    
+
     # Start training
     print("\n🏋️ Starting training...")
     print("="*50)
