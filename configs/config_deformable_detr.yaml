@@ -3,7 +3,7 @@
 dataset:
   name: CSAW
   splits_dir: ../dataset
-  max_size: 800
+  max_size: 800  # Increased for better performance with Deformable DETR
 
 model:
   model_name: SenseTime/deformable-detr
@@ -12,73 +12,61 @@ data:
   train_dir: train
   val_dir: val
   test_dir: test
-  batch_size: 1  # Minimum batch size để tránh OOM
-  num_workers: 0  # Disable multiprocessing để tránh conflicts
-  image_size: 800
+  batch_size: 4  # Reduced due to higher memory usage of Deformable DETR
+  num_workers: 4
+  image_size: 800  # Standard size for Deformable DETR
 
 training:
   output_dir: ../tmp
-  epochs: 50  # Giảm epochs để test trước
-  batch_size: 1
-  learning_rate: 0.0005  # Tăng learning rate để học nhanh hơn
-  weight_decay: 0.00001  # Giảm weight decay
-  warmup_ratio: 0.1  # Tăng warmup để ổn định
-  lr_scheduler_type: cosine  # Cosine scheduler thường tốt hơn cho detection
+  epochs: 50  # Deformable DETR typically needs more epochs
+  batch_size: 4
+  learning_rate: 0.0001  # Conservative learning rate
+  weight_decay: 0.0001
+  warmup_ratio: 0.1  # Longer warmup for stability
+  lr_scheduler_type: cosine_with_restarts
+  lr_scheduler_kwargs:
+    num_cycles: 2
   eval_do_concat_batches: false
-  evaluation_strategy: steps
-  eval_steps: 50  # Evaluate thường xuyên hơn
-  save_strategy: steps
-  save_steps: 50
+  evaluation_strategy: epoch
+  save_strategy: epoch
   save_total_limit: 2
   logging_strategy: steps
-  logging_steps: 10  # Log thường xuyên để monitor
+  logging_steps: 50
   load_best_model_at_end: true
   metric_for_best_model: eval_map_50
   greater_is_better: true
-  dataloader_num_workers: 0
-  gradient_accumulation_steps: 32  # Rất cao để compensate batch size = 1
+  dataloader_num_workers: 4
+  gradient_accumulation_steps: 4  # Increased to compensate for smaller batch size
   remove_unused_columns: false
-  fp16: false  # Disable FP16 để stability
-  gradient_checkpointing: false
-  max_grad_norm: 5.0  # Tăng để tránh gradient explosion
+  fp16: true  # Enable mixed precision for memory efficiency
+  gradient_checkpointing: true  # Save memory
+  max_grad_norm: 0.1  # Gradient clipping for stability
 
-  # Thêm các setting để suppress warnings và improve stability
-  ignore_data_skip: true
-  push_to_hub: false
-  hub_model_id: null
-  hub_strategy: "every_save"
-  hub_token: null
-  hub_private_repo: false
-
-  # Loss và optimization settings
-  label_smoothing_factor: 0.0  # Disable label smoothing cho detection
-  optim: "adamw_torch"  # Explicit optimizer
-
-  # Data loading settings
-  dataloader_drop_last: false
-  dataloader_pin_memory: false
+# Deformable DETR specific settings
+deformable_detr:
+  num_queries: 300  # Number of object queries
+  num_feature_levels: 4  # Multi-scale feature levels
+  dec_n_points: 4  # Number of sampling points in decoder
+  enc_n_points: 4  # Number of sampling points in encoder
+  with_box_refine: true  # Enable iterative bounding box refinement
+  two_stage: true  # Enable two-stage training
 
 logging:
-  use_wandb: false  # Disable wandb để focus vào training
+  use_wandb: true
   wandb_project: MammoMix_DeformableDETR
-  log_interval: 5
+  log_interval: 10
 
 seed: 42
 
 wandb:
   wandb_dir: ../wandb
 
-# Environment settings để suppress warnings
-environment:
-  suppress_warnings: true
-  pytorch_warnings: false
-  transformers_warnings: false
-
-# Model loading settings
-model_loading:
-  low_cpu_mem_usage: true
-  torch_dtype: "auto"
-  device_map: null
-  trust_remote_code: false
-  revision: "main"
-  use_safetensors: true
+# Data augmentation for Deformable DETR
+augmentation:
+  horizontal_flip_prob: 0.5
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.1
+  max_size: 1333  # Maximum image size during training
+  scales: [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]  # Multi-scale training
