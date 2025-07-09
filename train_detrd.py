@@ -61,7 +61,7 @@ def load_deformable_detr_model(model_name, config):
         print("✅ Deformable DETR loaded with basic config")
         return model
 
-def create_deformable_training_args(config, dataset_name):
+def create_deformable_training_args(config, dataset_name, epoch_override=None):
     """Create optimized training arguments for Deformable DETR."""
     training_cfg = config.get('training', {})
     
@@ -69,7 +69,8 @@ def create_deformable_training_args(config, dataset_name):
     batch_size = min(training_cfg.get('batch_size', 2), 2)  # Force small batch
     grad_accum = max(training_cfg.get('gradient_accumulation_steps', 16), 16)  # High accumulation
     learning_rate = training_cfg.get('learning_rate', 0.0002)
-    epochs = training_cfg.get('epochs', 50)
+    # Use epoch_override if provided, otherwise use config
+    epochs = epoch_override if epoch_override is not None else training_cfg.get('epochs', 50)
     
     print(f"🔧 Deformable DETR Training Config:")
     print(f"   Batch size: {batch_size}")
@@ -86,7 +87,7 @@ def create_deformable_training_args(config, dataset_name):
     training_args = TrainingArguments(
         output_dir=training_cfg.get('output_dir', '../tmp'),
         run_name=run_name,
-        num_train_epochs=epochs,
+        num_train_epochs=epochs,  # Use the corrected epochs value
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
@@ -142,6 +143,8 @@ def main(config_path, epoch=None, dataset=None):
     print(f"Dataset: {DATASET_NAME}")
     print(f"Model: {MODEL_NAME}")
     print(f"Max size: {MAX_SIZE}")
+    if epoch is not None:
+        print(f"Epochs (override): {epoch}")
     
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -150,7 +153,7 @@ def main(config_path, epoch=None, dataset=None):
     # Load image processor
     image_processor = get_image_processor(MODEL_NAME, MAX_SIZE)
     
-    # Create datasets
+    # Create datasets - don't pass epoch to dataset, it's for training epochs
     print("\n📊 Loading datasets...")
     train_dataset = BreastCancerDataset(
         split='train',
@@ -158,7 +161,7 @@ def main(config_path, epoch=None, dataset=None):
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
         model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch
+        # Remove dataset_epoch=epoch since epoch is for training epochs, not dataset epochs
     )
     
     val_dataset = BreastCancerDataset(
@@ -167,7 +170,7 @@ def main(config_path, epoch=None, dataset=None):
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
         model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch
+        # Remove dataset_epoch=epoch
     )
     
     print(f"Train: {len(train_dataset)} samples")
@@ -179,9 +182,9 @@ def main(config_path, epoch=None, dataset=None):
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params / 1e6:.2f}M")
     
-    # Create training arguments
+    # Create training arguments - pass epoch override
     print("\n⚙️ Setting up training...")
-    training_args = create_deformable_training_args(config, DATASET_NAME)
+    training_args = create_deformable_training_args(config, DATASET_NAME, epoch)
     
     # Create compute metrics function
     eval_compute_metrics_fn = get_eval_compute_metrics_fn(image_processor)
@@ -218,7 +221,7 @@ def main(config_path, epoch=None, dataset=None):
             dataset_name=DATASET_NAME,
             image_processor=image_processor,
             model_type=get_model_type(MODEL_NAME),
-            dataset_epoch=epoch
+            # Remove dataset_epoch=epoch
         )
         
         test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
