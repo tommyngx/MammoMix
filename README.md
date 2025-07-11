@@ -1,5 +1,7 @@
 # MMX
 
+*Empowering early detection, inspiring hope.*
+
 MammoMix is a deep learning-based object detection project for identifying breast cancer in medical images. It leverages state-of-the-art models and libraries for robust and reproducible results.
 
 ## Features
@@ -39,8 +41,8 @@ If you use this project, please cite:
 ```
 @misc{mammomix2025,
   title={MammoMix: Breast Cancer Object Detection},
-  author={Your Name},
+  author={UTS},
   year={2025},
-  url={https://github.com/yourusername/MammoMix}
+  url={https://github.com/tommyngx/MammoMix}
 }
 ```
