@@ -23,10 +23,35 @@ pip install -r requirements.txt
 
 ## Usage
 
-Train or evaluate the model using your dataset. Example:
+### Train YOLOS
 
 ```bash
-python train.py --config configs/train_config.yaml
+python train.py --config configs/train_config.yaml --dataset CSAW
+python train.py --config configs/train_config.yaml --dataset DMID
+python train.py --config configs/train_config.yaml --dataset DDSM
+```
+
+### Train Deformable DETR
+
+```bash
+python train_detrd.py --config configs/config_deformable_detr.yaml --dataset CSAW
+python train_detrd.py --config configs/config_deformable_detr.yaml --dataset DMID
+python train_detrd.py --config configs/config_deformable_detr.yaml --dataset DDSM
+```
+
+### Test YOLOS
+
+```bash
+python train.py --config configs/train_config.yaml --dataset CSAW --phase 2 --test
+python train.py --config configs/train_config.yaml --dataset DMID --phase 2 --test
+python train.py --config configs/train_config.yaml --dataset DDSM --phase 2 --test
+```
+
+### Test Deformable DETR
+
+```bash
+python train_detrd.py --config configs/config_deformable_detr.yaml --dataset CSAW
+# (After training, test results will be printed automatically)
 ```
 
 ## Requirements
