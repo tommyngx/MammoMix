@@ -66,30 +66,26 @@ def create_deformable_training_args(config, dataset_name, epoch_override=None):
     """Create optimized training arguments for Deformable DETR."""
     training_cfg = config.get('training', {})
     
-    # Optimized settings for Deformable DETR
-    batch_size = min(training_cfg.get('batch_size', 2), 2)  # Force small batch
-    grad_accum = max(training_cfg.get('gradient_accumulation_steps', 16), 16)  # High accumulation
-    learning_rate = training_cfg.get('learning_rate', 0.0002)
-    # Use epoch_override if provided, otherwise use config
-    epochs = epoch_override if epoch_override is not None else training_cfg.get('epochs', 50)
-    
+    # --- TUNE THESE FOR LEARNING ---
+    batch_size = 1  # Deformable DETR is memory hungry, use 1 for safety
+    grad_accum = 32  # Effective batch size = 32
+    learning_rate = 0.0005  # Higher LR for faster convergence
+    epochs = epoch_override if epoch_override is not None else training_cfg.get('epochs', 100)
+    warmup_ratio = 0.05  # Shorter warmup
+    weight_decay = 0.00001  # Lower weight decay
+    max_grad_norm = 5.0  # Higher gradient clipping
+    # --------------------------------
+
     print(f"🔧 Deformable DETR Training Config:")
     print(f"   Batch size: {batch_size}")
     print(f"   Gradient accumulation: {grad_accum}")
     print(f"   Effective batch size: {batch_size * grad_accum}")
     print(f"   Learning rate: {learning_rate}")
     print(f"   Epochs: {epochs}")
-    
-    # Create run name
+
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"DeformableDETR_{dataset_name}_{date_str}"
-    
-    # Use a metric that always exists for best model selection (e.g. 'eval_loss')
-    metric_for_best_model = training_cfg.get('metric_for_best_model', 'eval_loss')
-    if metric_for_best_model not in ['eval_loss', 'eval_runtime', 'eval_samples_per_second', 'eval_steps_per_second', 'epoch']:
-        metric_for_best_model = 'eval_loss'
-    
-    # Training arguments optimized for Deformable DETR
+
     training_args = TrainingArguments(
         output_dir=training_cfg.get('output_dir', '../tmp'),
         run_name=run_name,
@@ -98,40 +94,27 @@ def create_deformable_training_args(config, dataset_name, epoch_override=None):
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
         learning_rate=learning_rate,
-        weight_decay=training_cfg.get('weight_decay', 0.0001),
-        warmup_ratio=training_cfg.get('warmup_ratio', 0.1),
-        lr_scheduler_type=training_cfg.get('lr_scheduler_type', 'linear'),
-        
-        # Evaluation and saving
-        eval_strategy=training_cfg.get('evaluation_strategy', 'epoch'),
-        eval_steps=training_cfg.get('eval_steps', 50) if 'eval_steps' in training_cfg else None,
-        save_strategy=training_cfg.get('save_strategy', 'epoch'),
-        save_steps=training_cfg.get('save_steps', 50) if 'save_steps' in training_cfg else None,
-        save_total_limit=training_cfg.get('save_total_limit', 2),
-        
-        # Logging
-        logging_strategy=training_cfg.get('logging_strategy', 'steps'),
-        logging_steps=training_cfg.get('logging_steps', 25),
-        
-        # Model selection
-        load_best_model_at_end=training_cfg.get('load_best_model_at_end', True),
-        metric_for_best_model=metric_for_best_model,
-        greater_is_better=training_cfg.get('greater_is_better', False),  # For loss, lower is better
-        
-        # Optimization for stability
-        fp16=False,  # Disable FP16 for Deformable DETR stability
+        weight_decay=weight_decay,
+        warmup_ratio=warmup_ratio,
+        lr_scheduler_type='cosine',
+        eval_strategy='epoch',
+        save_strategy='epoch',
+        save_total_limit=2,
+        logging_strategy='steps',
+        logging_steps=10,
+        load_best_model_at_end=True,
+        metric_for_best_model='eval_loss',
+        greater_is_better=False,
+        fp16=False,
         gradient_checkpointing=False,
-        max_grad_norm=training_cfg.get('max_grad_norm', 1.0),
-        dataloader_num_workers=0,  # Disable multiprocessing
+        max_grad_norm=max_grad_norm,
+        dataloader_num_workers=0,
         dataloader_pin_memory=False,
         dataloader_drop_last=False,
         remove_unused_columns=False,
-        
-        # Reporting
         report_to="wandb" if training_cfg.get('use_wandb', True) else [],
         disable_tqdm=False,
     )
-    
     return training_args
 
 def main(config_path, epoch=None, dataset=None):
@@ -246,6 +229,23 @@ def main(config_path, epoch=None, dataset=None):
     except Exception as e:
         print(f"\n❌ Training failed: {e}")
         import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train Deformable DETR for breast cancer detection")
+    parser.add_argument('--config', type=str, default='configs/config_deformable_detr.yaml', 
+                       help='Path to config yaml')
+    parser.add_argument('--epoch', type=int, default=None, 
+                       help='Number of epochs (overrides config)')
+    parser.add_argument('--dataset', type=str, default=None, 
+                       help='Dataset name (CSAW/DMID/DDSM, overrides config)')
+    
+    args = parser.parse_args()
+    
+    print("🔬 Deformable DETR for Breast Cancer Detection")
+    print("=" * 50)
+    
+    main(args.config, args.epoch, args.dataset)
         traceback.print_exc()
 
 if __name__ == "__main__":
