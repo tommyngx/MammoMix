@@ -246,20 +246,3 @@ if __name__ == "__main__":
     print("=" * 50)
     
     main(args.config, args.epoch, args.dataset)
-        traceback.print_exc()
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Deformable DETR for breast cancer detection")
-    parser.add_argument('--config', type=str, default='configs/config_deformable_detr.yaml', 
-                       help='Path to config yaml')
-    parser.add_argument('--epoch', type=int, default=None, 
-                       help='Number of epochs (overrides config)')
-    parser.add_argument('--dataset', type=str, default=None, 
-                       help='Dataset name (CSAW/DMID/DDSM, overrides config)')
-    
-    args = parser.parse_args()
-    
-    print("🔬 Deformable DETR for Breast Cancer Detection")
-    print("=" * 50)
-    
-    main(args.config, args.epoch, args.dataset)
