@@ -1,5 +1,8 @@
-import argparse
 import os
+import yaml
+import torch
+import datetime
+import numpy as np
 
 # Suppress TensorFlow and CUDA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Tắt log của TensorFlow (0=verbose, 1=info, 2=warning, 3=error)
@@ -9,20 +12,7 @@ os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_ENABLE_DEPRECATION_WARNINGS'] = 'FALSE'
 os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'  # Suppress Albumentations update warnings
 
-import pickle
-import numpy as np
-import albumentations as A
-import xml.etree.ElementTree as ET
-import yaml
-from PIL import Image
-from functools import partial
-from dataclasses import dataclass
-from sklearn.linear_model import LinearRegression
 from pathlib import Path
-import datetime
-from tqdm.auto import tqdm  # Add this import
-
-import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision.ops import box_iou
 from transformers import (
@@ -33,15 +23,16 @@ from transformers import (
     EarlyStoppingCallback,
     IntervalStrategy,  # Add this to imports
 )
-
-from dataset import BreastCancerDataset, collate_fn
+from loader import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn
+
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
 
 def main(config_path, epoch=None, dataset=None):
     config = load_config(config_path)
@@ -51,14 +42,13 @@ def main(config_path, epoch=None, dataset=None):
     SPLITS_DIR = Path(config.get('dataset', {}).get('splits_dir', '/content/dataset'))
     MODEL_NAME = config.get('model', {}).get('model_name', 'hustvl/yolos-base')
     MAX_SIZE = config.get('dataset', {}).get('max_size', 640)
+    image_processor = get_image_processor(MODEL_NAME, MAX_SIZE)
 
     # Add wandb folder support
     wandb_dir = None
     if 'wandb' in config and 'wandb_dir' in config['wandb']:
         wandb_dir = config['wandb']['wandb_dir']
         print(f"Wandb directory: {wandb_dir}")
-
-    image_processor = get_image_processor(MODEL_NAME, MAX_SIZE)
 
     # Get data directories from config - use the same SPLITS_DIR for consistency
     data_config = config['data']
@@ -90,9 +80,7 @@ def main(config_path, epoch=None, dataset=None):
         shuffle=True,
         collate_fn=collate_fn
     )
-
     print(f'Train loader: {len(train_dataset)} samples')
-    print(f'Val loader: {len(val_dataset)} samples')
     print(f"Train loader batches: {len(train_loader)}")
 
     model = AutoModelForObjectDetection.from_pretrained(
@@ -100,11 +88,10 @@ def main(config_path, epoch=None, dataset=None):
         id2label={0: 'cancer'},
         label2id={'cancer': 0},
         #num_queries=8,
-        auxiliary_loss=False,
         #use_pretrained_backbone=False,
+        # auxiliary_loss=True,
         ignore_mismatched_sizes=True,
     )
-
     total_params = sum(p.numel() for p in model.parameters())
     print(f'Model initialized with {total_params / 1e6:.2f}M parameters')
 
@@ -112,7 +99,7 @@ def main(config_path, epoch=None, dataset=None):
     training_cfg = config.get('training', {})
     output_dir = training_cfg.get('output_dir', '/tmp')
     # Use CLI epoch if provided, else from config
-    num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 20)
+    num_train_epochs = epoch if epoch is not None else training_cfg.get('epochs', 200)
     per_device_train_batch_size = training_cfg.get('batch_size', 8)
     per_device_eval_batch_size = training_cfg.get('batch_size', 8)
     learning_rate = training_cfg.get('learning_rate', 5e-5)
@@ -126,18 +113,16 @@ def main(config_path, epoch=None, dataset=None):
     save_total_limit = training_cfg.get('save_total_limit', 1)
     logging_strategy = training_cfg.get('logging_strategy', 'epoch')
     load_best_model_at_end = training_cfg.get('load_best_model_at_end', True)
-    metric_for_best_model = training_cfg.get('metric_for_best_model', 'eval_map_50')
+    metric_for_best_model = training_cfg.get('metric_for_best_model', 'eval_map')
     greater_is_better = training_cfg.get('greater_is_better', True)
     dataloader_num_workers = training_cfg.get('num_workers', 2)
     gradient_accumulation_steps = training_cfg.get('gradient_accumulation_steps', 2)
     remove_unused_columns = training_cfg.get('remove_unused_columns', False)
-
     print(f"Using epoch (num_train_epochs): {num_train_epochs}")
 
     # Set a unique run_name for wandb
     date_str = datetime.datetime.now().strftime("%d%m%y")
     run_name = f"{MODEL_NAME.replace('/', '_')}_{DATASET_NAME}_{date_str}"
-
     training_args = TrainingArguments(
         output_dir=output_dir,
         run_name=run_name,
@@ -200,7 +185,6 @@ def main(config_path, epoch=None, dataset=None):
     print(f'Test dataset: {len(test_dataset)} samples')
     test_results = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix='test')
     
-    # Print test results
     print("\n=== Test Results ===")
     for key, value in test_results.items():
         print(f"{key}: {value}")

@@ -19,7 +19,7 @@ from transformers import AutoImageProcessor, AutoModelForObjectDetection, Traini
 
 # Import reusable functions from train.py
 from train import load_config
-from dataset import BreastCancerDataset, collate_fn
+from loader import BreastCancerDataset, collate_fn
 from utils import get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn, calculate_custom_map_metrics
 

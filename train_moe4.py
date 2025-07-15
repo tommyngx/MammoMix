@@ -28,7 +28,7 @@ from transformers import (
     AutoModelForObjectDetection,
 )
 
-from dataset import BreastCancerDataset, collate_fn
+from loader import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import run_model_inference_with_map
 import pandas as pd

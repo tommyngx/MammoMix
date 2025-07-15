@@ -59,7 +59,7 @@ except ImportError:
     SimpleDatasetClassifier = None
     load_expert_models = None
 
-from dataset import BreastCancerDataset, collate_fn
+from loader import BreastCancerDataset, collate_fn
 from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn, run_model_inference_with_map
 
