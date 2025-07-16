@@ -82,7 +82,7 @@ def main(config_path, epoch=None, dataset=None):
         MODEL_NAME,
         id2label={0: 'cancer'},
         label2id={'cancer': 0},
-        num_queries= 100,
+        num_queries= 300,
         #use_pretrained_backbone=False,
         auxiliary_loss=True,
         ignore_mismatched_sizes=True,
