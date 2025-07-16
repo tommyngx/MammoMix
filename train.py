@@ -55,7 +55,7 @@ def main(config_path, epoch=None, dataset=None):
         splits_dir=SPLITS_DIR,
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
+        #model_type=get_model_type(MODEL_NAME),
         dataset_epoch=epoch  # <-- renamed argument
     )
     val_dataset = BreastCancerDataset(
@@ -63,7 +63,7 @@ def main(config_path, epoch=None, dataset=None):
         splits_dir=SPLITS_DIR,
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
-        model_type=get_model_type(MODEL_NAME),
+        #model_type=get_model_type(MODEL_NAME),
         dataset_epoch=epoch  # <-- renamed argument
     )
 
