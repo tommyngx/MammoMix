@@ -28,12 +28,6 @@ from utils import load_config, get_image_processor, get_model_type
 from evaluation import get_eval_compute_metrics_fn
 
 
-def load_config(config_path):
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
-
-
 def main(config_path, epoch=None, dataset=None):
     config = load_config(config_path)
     DATASET_NAME = dataset if dataset is not None else config.get('dataset', {}).get('name', 'CSAW')

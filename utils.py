@@ -29,3 +29,8 @@ def xml2dicts(bboxes, width, height): # Convert VOC boxes to a list of dictionar
         xmax, ymax = bbox['xmax'], bbox['ymax']
         detr_bboxes.append({ 'class_id': class_id, 'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax })
     return detr_bboxes
+
+def load_config(config_path):
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
