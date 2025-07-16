@@ -165,7 +165,7 @@ def main(config_path, epoch=None, dataset=None):
     trainer.train()
     # Add DDMMYY to the save path
     date_str = datetime.datetime.now().strftime("%d%m%y")
-    trainer.save_model(f'../yolos_{DATASET_NAME}_{date_str}')
+    trainer.save_model(f'../detr_{DATASET_NAME}_{date_str}')
 
     # Evaluate on test dataset
     print("\n=== Evaluating on test dataset ===")
