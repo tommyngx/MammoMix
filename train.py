@@ -56,7 +56,7 @@ def main(config_path, epoch=None, dataset=None):
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
         #model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch  # <-- renamed argument
+        #dataset_epoch=epoch  # <-- renamed argument
     )
     val_dataset = BreastCancerDataset(
         split='val',
@@ -64,7 +64,7 @@ def main(config_path, epoch=None, dataset=None):
         dataset_name=DATASET_NAME,
         image_processor=image_processor,
         #model_type=get_model_type(MODEL_NAME),
-        dataset_epoch=epoch  # <-- renamed argument
+        #dataset_epoch=epoch  # <-- renamed argument
     )
 
     train_loader = DataLoader(
